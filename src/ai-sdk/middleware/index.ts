@@ -152,12 +152,14 @@ export function auditMiddleware(
               if (chunk.type === 'text-delta') {
                 chunks.push(chunk.textDelta)
               }
+              if (chunk.type === 'response-metadata') {
+                const meta = chunk as Record<string, unknown>
+                streamModelId = (meta.modelId as string) ?? null
+              }
               if (chunk.type === 'finish') {
                 const finishChunk = chunk as Record<string, unknown>
-                streamUsage = finishChunk.usage as typeof streamUsage ?? null
+                streamUsage = normaliseUsage(finishChunk.usage as Record<string, unknown> | undefined)
                 streamFinishReason = finishChunk.finishReason as string | undefined
-                const response = finishChunk.response as Record<string, unknown> | undefined
-                streamModelId = response?.modelId as string ?? null
               }
               controller.enqueue(chunk)
             },
@@ -241,12 +243,56 @@ function extractModelId(result: Record<string, unknown>): string | null {
   return (response?.modelId as string) ?? null
 }
 
+/**
+ * Extract output text from the result.
+ *
+ * - For regular generateText calls: result.text is a string.
+ * - For structured output (JSON mode): result.text contains the JSON string.
+ * - For tool-mode structured output (generateObject with tool mode):
+ *   result.text may be undefined; the JSON lives in toolCalls[0].args.
+ *
+ * Falls back to stringified tool call args when text is absent.
+ */
 function extractText(result: Record<string, unknown>): string {
-  return (result.text as string) ?? ''
+  if (typeof result.text === 'string' && result.text.length > 0) {
+    return result.text
+  }
+
+  const toolCalls = result.toolCalls as Array<Record<string, unknown>> | undefined
+  if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
+    const args = toolCalls[0].args
+    if (typeof args === 'string') return args
+    if (args && typeof args === 'object') {
+      try { return JSON.stringify(args) } catch { /* fall through */ }
+    }
+  }
+
+  return ''
 }
 
 function extractFinishReason(result: Record<string, unknown>): string | undefined {
-  return result.finishReason as string | undefined
+  const reason = result.finishReason
+  if (typeof reason === 'string') return reason
+  return undefined
+}
+
+/**
+ * Normalise a usage object into the shape expected by the audit schema.
+ *
+ * The AI SDK's LanguageModelV1 provides { promptTokens, completionTokens }
+ * without totalTokens. Some providers may include totalTokens. This helper
+ * handles both cases and computes totalTokens when absent.
+ */
+function normaliseUsage(usage: Record<string, unknown> | undefined): {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+} | null {
+  if (!usage) return null
+  const prompt = (typeof usage.promptTokens === 'number') ? usage.promptTokens : 0
+  const completion = (typeof usage.completionTokens === 'number') ? usage.completionTokens : 0
+  const total = (typeof usage.totalTokens === 'number') ? usage.totalTokens : (prompt + completion)
+  return { promptTokens: prompt, completionTokens: completion, totalTokens: total }
 }
 
 function extractUsage(result: Record<string, unknown>): {
@@ -254,15 +300,16 @@ function extractUsage(result: Record<string, unknown>): {
   completionTokens: number
   totalTokens: number
 } | null {
-  const usage = result.usage as Record<string, unknown> | undefined
-  if (!usage) return null
-  return {
-    promptTokens: (usage.promptTokens as number) ?? 0,
-    completionTokens: (usage.completionTokens as number) ?? 0,
-    totalTokens: (usage.totalTokens as number) ?? 0,
-  }
+  return normaliseUsage(result.usage as Record<string, unknown> | undefined)
 }
 
+/**
+ * Extract tool calls from the result.
+ *
+ * The AI SDK's LanguageModelV1FunctionToolCall defines args as a stringified
+ * JSON string. We parse it into an object for structured logging. If parsing
+ * fails, the raw string is wrapped in a { _raw: ... } object.
+ */
 function extractToolCalls(result: Record<string, unknown>): Array<{
   toolName: string
   args: Record<string, unknown>
@@ -272,8 +319,26 @@ function extractToolCalls(result: Record<string, unknown>): Array<{
 
   return toolCalls.map((tc) => ({
     toolName: (tc.toolName as string) ?? 'unknown',
-    args: (tc.args as Record<string, unknown>) ?? {},
+    args: parseToolArgs(tc.args),
   }))
+}
+
+function parseToolArgs(args: unknown): Record<string, unknown> {
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>
+      }
+      return { _raw: args }
+    } catch {
+      return { _raw: args }
+    }
+  }
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    return args as Record<string, unknown>
+  }
+  return {}
 }
 
 function extractParams(params: Record<string, unknown>): Record<string, unknown> {
