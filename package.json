@@ -6,25 +6,25 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
+      "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
     "./ai-sdk": {
       "types": "./dist/ai-sdk/index.d.ts",
-      "import": "./dist/ai-sdk/index.mjs",
+      "import": "./dist/ai-sdk/index.js",
       "require": "./dist/ai-sdk/index.cjs"
     },
     "./ai-sdk/middleware": {
       "types": "./dist/ai-sdk/middleware/index.d.ts",
-      "import": "./dist/ai-sdk/middleware/index.mjs",
+      "import": "./dist/ai-sdk/middleware/index.js",
       "require": "./dist/ai-sdk/middleware/index.cjs"
     }
   },
   "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "aiact-audit-log": "./dist/cli/index.mjs"
+    "aiact-audit-log": "./dist/cli/index.js"
   },
   "files": [
     "dist",
