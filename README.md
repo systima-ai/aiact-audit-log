@@ -2,7 +2,7 @@
 
 Structured, tamper-evident audit logging for AI systems. Technical logging capability for EU AI Act Article 12 compliance.
 
-- **Schema mapped to Article 12**: every field documents which paragraph it satisfies
+- **Schema mapped to Article 12**: every field is annotated with the Article 12 paragraph it relates to
 - **SHA-256 hash chains**: tamper-evident log integrity that a regulator can independently verify
 - **S3-native storage**: logs stay in your infrastructure, under your control
 - **AI SDK middleware**: automatic capture for every LLM call via [Vercel AI SDK](https://sdk.vercel.ai)
@@ -228,7 +228,7 @@ const result = await reader.verifyChain({
 
 #### `reader.stats(options?)`
 
-Aggregate metrics for post-market monitoring (Article 72).
+Aggregate metrics that can feed into post-market monitoring (Article 72).
 
 ```typescript
 const stats = await reader.stats({ from: '2026-03-01T00:00:00Z', to: '2026-03-31T23:59:59Z' })
@@ -344,7 +344,7 @@ npx @systima/aiact-audit-log export \
 
 ## Schema
 
-Every log entry follows a schema explicitly mapped to Article 12 paragraphs. Required fields:
+Every log entry follows a schema annotated with references to the Article 12 paragraphs each field relates to. Required fields:
 
 | Field | Type | Article Reference |
 |---|---|---|

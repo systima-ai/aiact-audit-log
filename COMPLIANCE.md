@@ -6,11 +6,11 @@ This document defines the precise boundary of what the library covers and what i
 
 ## 1. Scope of Compliance Claims
 
-### 1.1 This package satisfies
+### 1.1 What this package provides
 
-- **Article 12(1)**: The technical capability requirement for automatic recording of events. Once configured, the logger captures events without manual intervention and operates over the lifetime of the system. The middleware integration strengthens this by intercepting LLM calls automatically.
-- **Article 12(2)**: The traceability enablement requirement. The schema captures sufficient detail to enable risk identification (12(2)(a)), facilitate post-market monitoring (12(2)(b)), and support deployer monitoring (12(2)(c)).
-- **Article 19(1)**: The minimum retention floor, when correctly configured. The logger enforces a 180-day minimum and stores logs in customer-controlled infrastructure.
+- **Article 12(1) — technical capability for automatic recording**: Once configured, the logger captures events without manual intervention and operates over the lifetime of the system. The middleware integration automates capture for LLM calls. However, Article 12(1) requires recording of all relevant "events," not only LLM calls. Non-LLM events (human interventions, session boundaries, system events) require explicit instrumentation by the integrator. The package provides the mechanism; the integrator must ensure all relevant event types are captured.
+- **Article 12(2) — data infrastructure for traceability**: The schema captures fields that can support risk identification (12(2)(a)), post-market monitoring (12(2)(b)), and deployer monitoring (12(2)(c)). However, whether the captured events are actually "relevant" for these purposes depends on what the integrator instruments and how the system is deployed. The package provides the data capture layer; it does not determine what constitutes a risk-relevant event (that is domain-specific), implement monitoring procedures, or provide deployer access controls.
+- **Article 19(1) — retention floor enforcement**: When correctly configured, the logger enforces a 180-day minimum and stores logs in customer-controlled infrastructure. Ongoing retention depends on operational discipline (S3 lifecycle policies, IAM permissions).
 
 ### 1.2 This package supports but does not implement
 
@@ -48,7 +48,7 @@ The following obligations require organisational processes that a logging librar
 
 > "High-risk AI systems shall technically allow for the automatic recording of events (logs) over the lifetime of the system."
 
-| Schema field | How it satisfies the requirement |
+| Schema field | How it supports the requirement |
 |---|---|
 | `entryId` (UUIDv7) | Unique identification of each recorded event |
 | `systemId` | Identifies which AI system produced the log |
@@ -57,13 +57,15 @@ The following obligations require organisational processes that a logging librar
 | `prevHash` + `hash` (SHA-256) | Provides tamper evidence for trustworthy recording |
 | `captureMethod` | Documents how the event was captured (middleware = automatic) |
 
-The middleware integration (`auditMiddleware`) satisfies the "automatic" requirement for LLM calls by intercepting every model invocation without manual instrumentation.
+The middleware integration (`auditMiddleware`) automates capture for LLM calls by intercepting every model invocation without manual instrumentation. Other event types (human interventions, session boundaries, system events) require explicit `logger.log()` calls by the integrator.
 
 ### Article 12(2)(a): Risk identification
 
 > "...events relevant for identifying situations that may result in the high-risk AI system presenting a risk..."
 
-| Schema field | How it satisfies the requirement |
+**Note**: This sub-paragraph requires that the events recorded are "relevant for identifying situations that may result in... a risk." What constitutes a relevant event is domain-specific and depends on the system's risk profile and intended purpose. The library provides fields that _can_ support risk identification; whether they _do_ depends on the integrator capturing the right events for their system.
+
+| Schema field | How it supports the requirement |
 |---|---|
 | `eventType` | Categorises events for risk pattern detection |
 | `modelId` | Tracks which model version produced each output |
@@ -79,7 +81,9 @@ The middleware integration (`auditMiddleware`) satisfies the "automatic" require
 
 > "...facilitating the post-market monitoring referred to in Article 72..."
 
-| Schema field | How it satisfies the requirement |
+**Note**: This sub-paragraph requires that the logs "facilitate" the post-market monitoring system required by Article 72. The library provides raw data and basic aggregation. It does not implement monitoring procedures, define KPIs, set alert thresholds, or generate the monitoring plan required by Article 72(3). These are organisational responsibilities.
+
+| Schema field | How it supports the requirement |
 |---|---|
 | `latencyMs` | Enables performance degradation detection |
 | `usage` (token counts) | Enables cost and usage trend analysis |
@@ -93,39 +97,47 @@ The `stats` API and CLI command aggregate these fields for monitoring dashboards
 
 > "...monitoring the operation of high-risk AI systems referred to in Article 26(5)."
 
-| Schema field | How it satisfies the requirement |
+**Note**: This sub-paragraph requires that the logs support deployer monitoring. The library produces structured, exportable logs but does not address deployer access control, deployer-facing dashboards, or the operational procedures a deployer needs to meet Article 26(5) obligations.
+
+| Schema field | How it supports the requirement |
 |---|---|
 | All fields | The entire schema is documented and export-friendly (JSON Lines) |
 | `metadata` | Extensible key-value pairs for deployer-specific context |
 | `humanIntervention` | Records deployer oversight activities |
 
-The `query`, `export`, and `stats` APIs enable deployers to monitor system operation using the logs the system generates.
+The `query`, `export`, and `stats` APIs enable deployers to access and analyse log data. How deployers are granted access to the storage backend is an operational concern outside the library's scope.
 
-### Article 12(3)(a): Usage period recording
+### Article 12(3): Additional requirements for biometric identification systems
+
+**Scope**: Article 12(3) applies **only** to high-risk AI systems referred to in Annex III, point 1(a) (remote biometric identification systems). It does not apply to other high-risk AI systems.
+
+#### Article 12(3)(a): Usage period recording
 
 > "...recording of the period of each use of the system (start date and time and end date and time of each use)..."
 
-| Schema field | How it satisfies the requirement |
+| Schema field | How it supports the requirement |
 |---|---|
 | `eventType: 'session_start'` | Records the start of a usage session |
 | `eventType: 'session_end'` | Records the end of a usage session |
 | `timestamp` | Provides the date and time for each boundary |
 
-### Article 12(3)(b-d): Biometric system requirements
+The library provides these event types but does not auto-detect session boundaries. The integrator must emit `session_start` and `session_end` events explicitly.
 
-| Schema field | How it satisfies the requirement |
+#### Article 12(3)(b-d): Biometric-specific fields
+
+| Schema field | How it supports the requirement |
 |---|---|
 | `referenceDatabase` | 12(3)(b): identifies the reference database checked |
 | `matchResult` | 12(3)(c): records whether input matched a database record |
 | `humanIntervention.userId` | 12(3)(d): identifies the natural person who verified results |
 
-These fields are optional; they apply to systems covered by Annex III, point 1(a).
+These fields are optional in the schema. For biometric systems where they are legally required, the integrator must ensure they are populated. The library does not enforce their presence or validate that Article 14(5) dual-person verification requirements are met.
 
 ### Article 19(1): Log retention
 
 > "...the logs shall be kept for a period appropriate to the intended purpose of the high-risk AI system, of at least six months..."
 
-| Mechanism | How it satisfies the requirement |
+| Mechanism | How it supports the requirement |
 |---|---|
 | `retention.minimumDays` default of 180 | Enforces the six-month floor |
 | `ComplianceConfigError` on sub-minimum | Refuses to initialise below 180 days without explicit acknowledgement |
