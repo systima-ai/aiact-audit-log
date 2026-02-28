@@ -1,0 +1,97 @@
+{
+  "name": "@systima/aiact-audit-log",
+  "version": "0.1.0",
+  "description": "Structured, tamper-evident audit logging for AI systems — Article 12 EU AI Act compliance infrastructure",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./ai-sdk": {
+      "import": "./dist/ai-sdk/index.mjs",
+      "require": "./dist/ai-sdk/index.cjs",
+      "types": "./dist/ai-sdk/index.d.ts"
+    },
+    "./ai-sdk/middleware": {
+      "import": "./dist/ai-sdk/middleware/index.mjs",
+      "require": "./dist/ai-sdk/middleware/index.cjs",
+      "types": "./dist/ai-sdk/middleware/index.d.ts"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "aiact-audit-log": "./dist/cli/index.mjs"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "COMPLIANCE.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": false
+    },
+    "ai": {
+      "optional": true
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.750.0",
+    "@types/node": "^22.13.0",
+    "ai": "^4.1.0",
+    "citty": "^0.1.6",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "ai-act",
+    "eu-ai-act",
+    "audit-log",
+    "compliance",
+    "article-12",
+    "tamper-evident",
+    "hash-chain",
+    "ai-sdk",
+    "vercel-ai-sdk",
+    "llm",
+    "logging",
+    "regulated-ai",
+    "high-risk-ai"
+  ],
+  "author": "Systima <hello@systima.ai> (https://systima.ai)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/systima-ai/aiact-audit-log.git"
+  },
+  "homepage": "https://github.com/systima-ai/aiact-audit-log#readme",
+  "bugs": {
+    "url": "https://github.com/systima-ai/aiact-audit-log/issues"
+  }
+}
