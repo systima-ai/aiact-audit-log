@@ -1,6 +1,6 @@
 {
   "name": "@systima/aiact-audit-log",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Structured, tamper-evident audit logging for AI systems — Article 12 EU AI Act compliance infrastructure",
   "type": "module",
   "exports": {
