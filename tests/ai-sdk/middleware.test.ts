@@ -19,17 +19,27 @@ function createTestLogger(): { logger: AuditLogger; storage: MemoryStorage } {
   return { logger, storage }
 }
 
+/**
+ * Mock model that mirrors the real AI SDK LanguageModelV1 result shapes.
+ *
+ * Key differences from prior mocks:
+ * - usage has NO totalTokens (matches @ai-sdk/provider spec)
+ * - tool call args is a string (stringified JSON), not an object
+ * - streaming finish chunk has no response property
+ * - response-metadata is a separate stream chunk
+ * - finishReason is a plain string
+ */
 function createMockModel(response?: Partial<{
-  text: string
-  usage: { promptTokens: number; completionTokens: number; totalTokens: number }
+  text: string | undefined
+  usage: { promptTokens: number; completionTokens: number }
   finishReason: string
   modelId: string
   toolCalls: Array<{ toolCallType: string; toolCallId: string; toolName: string; args: string }>
   shouldError: boolean
 }>): LanguageModelV1 {
   const opts = {
-    text: 'Mock response',
-    usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+    text: 'Mock response' as string | undefined,
+    usage: { promptTokens: 10, completionTokens: 20 },
     finishReason: 'stop',
     modelId: 'test-provider/test-model',
     toolCalls: [] as Array<{ toolCallType: string; toolCallId: string; toolName: string; args: string }>,
@@ -66,8 +76,7 @@ function createMockModel(response?: Partial<{
         throw new Error('Stream error')
       }
 
-      const encoder = new TextEncoder()
-      const text = opts.text
+      const text = opts.text ?? ''
       const readableStream = new ReadableStream({
         start(controller) {
           for (const char of text) {
@@ -77,14 +86,15 @@ function createMockModel(response?: Partial<{
             })
           }
           controller.enqueue({
+            type: 'response-metadata',
+            id: 'resp_1',
+            timestamp: new Date(),
+            modelId: opts.modelId,
+          })
+          controller.enqueue({
             type: 'finish',
             finishReason: opts.finishReason,
             usage: opts.usage,
-            response: {
-              id: 'resp_1',
-              timestamp: new Date(),
-              modelId: opts.modelId,
-            },
           })
           controller.close()
         },
@@ -146,6 +156,86 @@ describe('auditMiddleware', () => {
     expect(entry.captureMethod).toBe('middleware')
     expect(entry.modelId).toBe('test-provider/test-model')
     expect(entry.latencyMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('computes totalTokens from promptTokens + completionTokens', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createMockModel({ usage: { promptTokens: 100, completionTokens: 50 } })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    })
+
+    await logger.flush()
+
+    const allFiles = await storage.list('')
+    const jsonlFiles = allFiles.filter((k) => k.endsWith('.jsonl'))
+    const data = await storage.read(jsonlFiles[0])
+    const entry = JSON.parse(data.toString('utf-8').trim().split('\n')[0])
+
+    expect(entry.usage.promptTokens).toBe(100)
+    expect(entry.usage.completionTokens).toBe(50)
+    expect(entry.usage.totalTokens).toBe(150)
+  })
+
+  it('captures output text from regular generateText calls', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createMockModel({ text: 'The answer is 42' })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    })
+
+    await logger.flush()
+
+    const allFiles = await storage.list('')
+    const jsonlFiles = allFiles.filter((k) => k.endsWith('.jsonl'))
+    const data = await storage.read(jsonlFiles[0])
+    const entry = JSON.parse(data.toString('utf-8').trim().split('\n')[0])
+
+    expect(entry.output.value).toBe('The answer is 42')
+  })
+
+  it('captures output from tool-mode structured output when text is absent', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const structuredJson = '{"name":"test","risk":"high"}'
+    const model = createMockModel({
+      text: undefined,
+      toolCalls: [
+        { toolCallType: 'function', toolCallId: 'tc_1', toolName: 'json', args: structuredJson },
+      ],
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Analyse' }] }],
+    })
+
+    await logger.flush()
+
+    const allFiles = await storage.list('')
+    const jsonlFiles = allFiles.filter((k) => k.endsWith('.jsonl'))
+    const data = await storage.read(jsonlFiles[0])
+    const entry = JSON.parse(data.toString('utf-8').trim().split('\n')[0])
+
+    expect(entry.output.value).toBe(structuredJson)
   })
 
   it('logs errors on doGenerate failure', async () => {
@@ -227,7 +317,7 @@ describe('auditMiddleware', () => {
     expect(entry.decisionId.length).toBeGreaterThan(0)
   })
 
-  it('logs tool calls from doGenerate', async () => {
+  it('logs tool calls with parsed args from doGenerate', async () => {
     const setup = createTestLogger()
     logger = setup.logger
     storage = setup.storage
@@ -258,14 +348,18 @@ describe('auditMiddleware', () => {
     const toolEntry = JSON.parse(lines[1])
     expect(toolEntry.eventType).toBe('tool_call')
     expect(toolEntry.toolCall.toolName).toBe('search')
+    expect(toolEntry.toolCall.toolArgs).toEqual({ query: 'test' })
   })
 
-  it('logs streaming responses on stream completion', async () => {
+  it('logs streaming responses with correct usage and modelId', async () => {
     const setup = createTestLogger()
     logger = setup.logger
     storage = setup.storage
 
-    const model = createMockModel({ text: 'Streamed response' })
+    const model = createMockModel({
+      text: 'Streamed response',
+      usage: { promptTokens: 15, completionTokens: 25 },
+    })
     const wrapped = auditMiddleware(model, { logger })
 
     const { stream } = await wrapped.doStream({
@@ -292,5 +386,9 @@ describe('auditMiddleware', () => {
     expect(entry.eventType).toBe('inference')
     expect(entry.captureMethod).toBe('middleware')
     expect(entry.output.value).toBe('Streamed response')
+    expect(entry.modelId).toBe('test-provider/test-model')
+    expect(entry.usage.promptTokens).toBe(15)
+    expect(entry.usage.completionTokens).toBe(25)
+    expect(entry.usage.totalTokens).toBe(40)
   })
 })
