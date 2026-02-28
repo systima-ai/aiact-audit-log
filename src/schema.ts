@@ -1,8 +1,7 @@
 /**
  * Schema definitions and runtime validation for audit log entries.
  *
- * Every field is annotated with the Article paragraph it satisfies.
- * The schema IS the Article 12 mapping.
+ * Every field is annotated with the Article 12 paragraph it relates to.
  */
 
 // ── Event types ─────────────────────────────────────────────
