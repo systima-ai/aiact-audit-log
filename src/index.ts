@@ -81,7 +81,9 @@ export type {
   StorageBackend,
   ObjectMetadata,
   S3StorageConfig,
+  FileSystemStorageConfig,
   StorageConfig,
 } from './storage/interface.js'
 
+export { FileSystemStorage } from './storage/filesystem.js'
 export { MemoryStorage } from './storage/memory.js'

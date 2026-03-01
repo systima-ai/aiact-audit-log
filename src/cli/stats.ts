@@ -14,6 +14,7 @@ export const statsCommand = defineCommand({
   },
   async run({ args }) {
     const reader = createReader({
+      dir: args['dir'],
       bucket: args['bucket'],
       region: args['region'],
       prefix: args['prefix'],

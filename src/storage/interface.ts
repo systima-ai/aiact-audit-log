@@ -1,9 +1,8 @@
 /**
  * Storage backend interface.
  *
- * Abstraction layer for log persistence. v0.1 ships with S3-compatible
- * storage only; future versions will add Azure Blob, GCS, and local
- * filesystem backends.
+ * Abstraction layer for log persistence. Supports S3-compatible storage
+ * and local filesystem backends.
  */
 
 export interface StorageBackend {
@@ -33,4 +32,10 @@ export interface S3StorageConfig {
   }
 }
 
-export type StorageConfig = S3StorageConfig
+export interface FileSystemStorageConfig {
+  type: 'filesystem'
+  directory: string
+  prefix?: string
+}
+
+export type StorageConfig = S3StorageConfig | FileSystemStorageConfig

@@ -6,8 +6,9 @@
  * analyse for post-market monitoring (Article 72).
  */
 
-import type { StorageBackend, StorageConfig, S3StorageConfig } from './storage/interface.js'
+import type { StorageBackend, StorageConfig } from './storage/interface.js'
 import { S3Storage } from './storage/s3.js'
+import { FileSystemStorage } from './storage/filesystem.js'
 import type { AuditLogEntry, AuditLogEntryExtended, EventType } from './schema.js'
 import {
   verifyChain,
@@ -69,6 +70,8 @@ export class AuditLogReader {
 
     if (config.storage.type === 's3') {
       this.storage = new S3Storage(config.storage)
+    } else if (config.storage.type === 'filesystem') {
+      this.storage = new FileSystemStorage(config.storage.directory)
     } else {
       throw new Error(`Unsupported storage type: ${(config.storage as { type: string }).type}`)
     }

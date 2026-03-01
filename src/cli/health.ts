@@ -11,6 +11,7 @@ export const healthCommand = defineCommand({
   },
   async run({ args }) {
     const logger = createLogger({
+      dir: args['dir'],
       bucket: args['bucket'],
       region: args['region'],
       prefix: args['prefix'],
