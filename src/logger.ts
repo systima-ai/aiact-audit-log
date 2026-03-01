@@ -1,9 +1,9 @@
 /**
  * AuditLogger — core class for structured, tamper-evident audit logging.
  *
- * Satisfies Article 12(1): automatic recording of events over the
+ * Supports Article 12(1): automatic recording of events over the
  * lifetime of the system. Entries are batched in memory and flushed
- * to S3-compatible storage with SHA-256 hash chains.
+ * to storage (S3 or local filesystem) with SHA-256 hash chains.
  */
 
 import type { StorageBackend, StorageConfig } from './storage/interface.js'
