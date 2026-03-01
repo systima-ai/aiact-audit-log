@@ -4,7 +4,7 @@ Structured, tamper-evident audit logging for AI systems. Technical logging capab
 
 - **Schema mapped to Article 12**: every field is annotated with the Article 12 paragraph it relates to
 - **SHA-256 hash chains**: tamper-evident log integrity that a regulator can independently verify
-- **S3-native storage**: logs stay in your infrastructure, under your control
+- **Flexible storage**: S3-compatible or local filesystem; logs stay in your infrastructure
 - **AI SDK middleware**: automatic capture for every LLM call via [Vercel AI SDK](https://sdk.vercel.ai)
 - **AsyncLocalStorage context**: correlate multi-step decisions without manual threading
 - **CLI tooling**: query, reconstruct, verify, coverage diagnostics, and compliance export
@@ -21,12 +21,22 @@ npm install @systima/aiact-audit-log
 ```typescript
 import { AuditLogger } from '@systima/aiact-audit-log'
 
+// S3 storage (production)
 const logger = new AuditLogger({
   systemId: 'loan-scorer-v2',
   storage: {
     type: 's3',
     bucket: 'my-audit-logs',
     region: 'eu-west-1',
+  },
+})
+
+// Or local filesystem (development / testing)
+const devLogger = new AuditLogger({
+  systemId: 'loan-scorer-v2',
+  storage: {
+    type: 'filesystem',
+    directory: './audit-logs',
   },
 })
 
@@ -117,12 +127,20 @@ The core class for structured, tamper-evident audit logging.
 const logger = new AuditLogger({
   // Required
   systemId: 'loan-scorer-v2',
+
+  // Option A: S3 storage (production)
   storage: {
     type: 's3',
     bucket: 'my-audit-logs',
     region: 'eu-west-1',
     prefix: 'aiact-logs',           // Default: 'aiact-logs'
   },
+
+  // Option B: Local filesystem (development)
+  // storage: {
+  //   type: 'filesystem',
+  //   directory: './audit-logs',
+  // },
 
   // Compliance settings (safe defaults)
   retention: {
@@ -186,8 +204,15 @@ Query, reconstruct, verify, and analyse audit logs.
 ```typescript
 import { AuditLogReader } from '@systima/aiact-audit-log'
 
+// S3
 const reader = new AuditLogReader({
   storage: { type: 's3', bucket: 'my-audit-logs', region: 'eu-west-1' },
+  systemId: 'loan-scorer-v2',
+})
+
+// Or local filesystem
+const devReader = new AuditLogReader({
+  storage: { type: 'filesystem', directory: './audit-logs' },
   systemId: 'loan-scorer-v2',
 })
 ```
@@ -299,43 +324,62 @@ const model = auditMiddleware(anthropic('claude-sonnet-4-5-20250929'), {
 npx @systima/aiact-audit-log <command> [options]
 ```
 
-All commands accept `--bucket`, `--region`, `--prefix`, `--endpoint`, and `--system-id` flags, or read from `AIACT_S3_BUCKET`, `AIACT_S3_REGION`, `AIACT_S3_PREFIX`, `AIACT_S3_ENDPOINT`, and `AIACT_SYSTEM_ID` environment variables.
+All commands accept storage flags for either local filesystem or S3:
+
+- **Local filesystem**: `--dir` (or `AIACT_LOCAL_DIR` env var)
+- **S3**: `--bucket`, `--region`, `--prefix`, `--endpoint` (or `AIACT_S3_BUCKET`, `AIACT_S3_REGION`, `AIACT_S3_PREFIX`, `AIACT_S3_ENDPOINT` env vars)
+
+All commands also accept `--system-id` (or `AIACT_SYSTEM_ID`).
 
 ### Commands
 
 ```bash
-# Query logs
+# Query logs (local filesystem)
 npx @systima/aiact-audit-log query \
+  --dir ./audit-logs \
+  --system-id loan-scorer-v2 \
+  --from 2026-03-01 --to 2026-03-15 \
+  --event-type inference --format json
+
+# Query logs (S3)
+npx @systima/aiact-audit-log query \
+  --bucket my-audit-logs --region eu-west-1 \
   --system-id loan-scorer-v2 \
   --from 2026-03-01 --to 2026-03-15 \
   --event-type inference --format json
 
 # Reconstruct a decision trace
 npx @systima/aiact-audit-log reconstruct \
+  --dir ./audit-logs \
   --system-id loan-scorer-v2 \
   --decision-id dec_abc123 --format timeline
 
 # Verify hash chain integrity
 npx @systima/aiact-audit-log verify \
+  --dir ./audit-logs \
   --system-id loan-scorer-v2 \
   --from 2026-03-01 --to 2026-03-31
 
 # Aggregate statistics
 npx @systima/aiact-audit-log stats \
+  --dir ./audit-logs \
   --system-id loan-scorer-v2 \
   --from 2026-03-01 --to 2026-03-31
 
 # Coverage diagnostic
 npx @systima/aiact-audit-log coverage \
+  --dir ./audit-logs \
   --system-id loan-scorer-v2 \
   --from 2026-03-01 --to 2026-03-31
 
 # Health check
 npx @systima/aiact-audit-log health \
+  --dir ./audit-logs \
   --system-id loan-scorer-v2
 
 # Export compliance evidence package
 npx @systima/aiact-audit-log export \
+  --dir ./audit-logs \
   --system-id loan-scorer-v2 \
   --from 2026-03-01 --to 2026-03-31 \
   --include-verification --include-coverage \
@@ -398,8 +442,8 @@ For a compliance assessment of your specific system covering risk management, hu
 ## Requirements
 
 - Node.js >= 18
-- `@aws-sdk/client-s3` ^3.x (peer dependency)
-- `ai` ^4.x (optional peer dependency, for AI SDK integration)
+- `@aws-sdk/client-s3` ^3.x (peer dependency; required for S3 storage, not needed for filesystem storage)
+- `ai` >=4.0.0 (optional peer dependency, for AI SDK middleware integration)
 
 ## Licence
 

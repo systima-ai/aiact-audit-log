@@ -4,11 +4,11 @@ Guide for AI coding agents contributing to `@systima/aiact-audit-log`.
 
 ## Project overview
 
-TypeScript library providing structured, tamper-evident audit logging for AI systems, designed to satisfy EU AI Act Article 12 record-keeping obligations. Published to npm as `@systima/aiact-audit-log`.
+TypeScript library providing structured, tamper-evident audit logging for AI systems, designed to support EU AI Act Article 12 record-keeping obligations. Published to npm as `@systima/aiact-audit-log`.
 
 - **Stack**: TypeScript, Node.js >= 18, vitest, tsup, pnpm
-- **Storage**: S3-compatible object storage via `@aws-sdk/client-s3` (peer dependency)
-- **Optional integration**: Vercel AI SDK (`ai` ^4.x, optional peer dependency)
+- **Storage**: S3-compatible object storage via `@aws-sdk/client-s3` (peer dependency) or local filesystem via built-in `FileSystemStorage`
+- **Optional integration**: Vercel AI SDK (`ai` >=4.0.0, optional peer dependency; middleware handles both V1 and V3 result formats)
 
 ## Setup commands
 
@@ -37,8 +37,9 @@ src/
     uuid.ts                   # UUIDv7 generation
     retention.ts              # S3 lifecycle policy management
   storage/
-    interface.ts              # StorageBackend interface
+    interface.ts              # StorageBackend interface + StorageConfig union
     s3.ts                     # S3 implementation
+    filesystem.ts             # Local filesystem implementation
     memory.ts                 # In-memory backend (testing only)
   ai-sdk/
     index.ts                  # logFromAISDKResult helper
@@ -93,12 +94,13 @@ tests/
 - **Hash chain**: every log entry has `seq`, `prevHash`, `hash`. Genesis entry uses `SHA-256("@systima/aiact-audit-log:genesis:{systemId}")` as seed. Chain cannot be disabled.
 - **Batching**: entries buffered in memory, flushed at `maxSize` or `maxDelayMs`. Chain maintained in-memory, persisted to `_chain/head.json` on each flush.
 - **Context propagation**: `AsyncLocalStorage` from `node:async_hooks`. `withAuditContext()` sets context; `getAuditContext()` reads it. Middleware auto-generates `decisionId` if no context is active.
-- **Storage layout**: `{systemId}/{year}/{month}/{day}/{fileIndex}.jsonl` with date-partitioned prefixes for lifecycle policy and query performance.
+- **Storage layout**: `{systemId}/{year}/{month}/{day}/{fileIndex}.jsonl` with date-partitioned prefixes for lifecycle policy and query performance. Works identically across S3 and filesystem backends.
+- **Storage backends**: `S3Storage` for production (requires `@aws-sdk/client-s3`), `FileSystemStorage` for local development and CLI inspection, `MemoryStorage` for tests. The `StorageConfig` union type is `S3StorageConfig | FileSystemStorageConfig`.
 - **Subpath exports**: `.` (core), `./ai-sdk` (helper), `./ai-sdk/middleware` (automatic capture). The `ai` package is an optional peer dependency.
 
 ## Important constraints
 
-- The `ai` package uses `LanguageModelV1` types with `LanguageModelV1Middleware` interface. Import `wrapLanguageModel` from `ai`.
+- The `ai` package types differ across versions: AI SDK v4 exports `LanguageModelV1` and `LanguageModelV1Middleware`; AI SDK v5/v6 renames these to `LanguageModel` and `LanguageModelMiddleware` (V3 spec). The library's dev dependency is `ai@^4.1.0` for type compatibility, but the middleware extraction functions handle both V1 and V3 result formats at runtime (content arrays, nested usage objects, object finishReason). Import `wrapLanguageModel` from `ai`.
 - `process.on('beforeExit', ...)` is used for shutdown hooks (not `process.once`, which causes MaxListenersExceeded warnings with many logger instances in tests).
 - UUIDv7 generation within the same millisecond does not guarantee sort order (random lower bits). Tests should only assert ordering across different milliseconds.
 - When a second logger instance writes to the same date path, it may overwrite the first logger's file (both start with `currentFileIndex = 0`). The chain head in `_chain/head.json` is the source of truth for continuity.

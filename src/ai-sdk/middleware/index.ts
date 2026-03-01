@@ -2,7 +2,7 @@
  * AI SDK middleware — automatic capture for Vercel AI SDK models.
  *
  * Wraps a LanguageModelV1 and automatically logs every inference call.
- * This is the primary mechanism for satisfying Article 12(1)'s
+ * This is the primary mechanism for supporting Article 12(1)'s
  * "automatic recording" requirement for inference events.
  *
  * Usage:
