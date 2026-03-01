@@ -159,7 +159,13 @@ export function auditMiddleware(
               if (chunk.type === 'finish') {
                 const finishChunk = chunk as Record<string, unknown>
                 streamUsage = normaliseUsage(finishChunk.usage as Record<string, unknown> | undefined)
-                streamFinishReason = finishChunk.finishReason as string | undefined
+                // V1: finishReason is a string; V3: finishReason is { unified, raw }
+                const reason = finishChunk.finishReason
+                if (typeof reason === 'string') {
+                  streamFinishReason = reason
+                } else if (reason && typeof reason === 'object') {
+                  streamFinishReason = ((reason as Record<string, unknown>).unified as string) ?? undefined
+                }
               }
               controller.enqueue(chunk)
             },
@@ -246,18 +252,49 @@ function extractModelId(result: Record<string, unknown>): string | null {
 /**
  * Extract output text from the result.
  *
- * - For regular generateText calls: result.text is a string.
- * - For structured output (JSON mode): result.text contains the JSON string.
- * - For tool-mode structured output (generateObject with tool mode):
- *   result.text may be undefined; the JSON lives in toolCalls[0].args.
+ * Handles two AI SDK result formats:
+ *
+ * **V1 format** (AI SDK v4; LanguageModelV1):
+ *   - result.text is a string
+ *   - result.toolCalls is an array with { toolName, args }
+ *
+ * **V3 format** (AI SDK v5/v6; LanguageModelV3GenerateResult):
+ *   - result.content is an array of content parts
+ *   - Text parts: { type: 'text', text: string }
+ *   - Tool calls: { type: 'tool-call', toolName, input: string }
  *
  * Falls back to stringified tool call args when text is absent.
  */
 function extractText(result: Record<string, unknown>): string {
+  // V1 path: result.text is a string (AI SDK v4)
   if (typeof result.text === 'string' && result.text.length > 0) {
     return result.text
   }
 
+  // V3 path: result.content is an array of content parts (AI SDK v5/v6)
+  const content = result.content as Array<Record<string, unknown>> | undefined
+  if (content && Array.isArray(content)) {
+    // Collect all text parts
+    const textParts = content
+      .filter((part) => part.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text as string)
+
+    if (textParts.length > 0) {
+      return textParts.join('')
+    }
+
+    // Fall back to tool-call input (structured output in V3)
+    const toolCallPart = content.find((part) => part.type === 'tool-call')
+    if (toolCallPart) {
+      const input = toolCallPart.input
+      if (typeof input === 'string') return input
+      if (input && typeof input === 'object') {
+        try { return JSON.stringify(input) } catch { /* fall through */ }
+      }
+    }
+  }
+
+  // V1 fallback: result.toolCalls array (AI SDK v4 tool-mode structured output)
   const toolCalls = result.toolCalls as Array<Record<string, unknown>> | undefined
   if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
     const args = toolCalls[0].args
@@ -270,18 +307,34 @@ function extractText(result: Record<string, unknown>): string {
   return ''
 }
 
+/**
+ * Extract finish reason from the result.
+ *
+ * - V1 (AI SDK v4): result.finishReason is a plain string ('stop', 'length', etc.)
+ * - V3 (AI SDK v5/v6): result.finishReason is { unified: string, raw: string | undefined }
+ */
 function extractFinishReason(result: Record<string, unknown>): string | undefined {
   const reason = result.finishReason
   if (typeof reason === 'string') return reason
+  if (reason && typeof reason === 'object') {
+    const unified = (reason as Record<string, unknown>).unified
+    if (typeof unified === 'string') return unified
+  }
   return undefined
 }
 
 /**
  * Normalise a usage object into the shape expected by the audit schema.
  *
- * The AI SDK's LanguageModelV1 provides { promptTokens, completionTokens }
- * without totalTokens. Some providers may include totalTokens. This helper
- * handles both cases and computes totalTokens when absent.
+ * Handles two AI SDK usage formats:
+ *
+ * **V1 format** (AI SDK v4):
+ *   { promptTokens: number, completionTokens: number }
+ *   No totalTokens; computed as prompt + completion.
+ *
+ * **V3 format** (AI SDK v5/v6; LanguageModelV3Usage):
+ *   { inputTokens: { total, noCache, cacheRead, cacheWrite },
+ *     outputTokens: { total, text, reasoning } }
  */
 function normaliseUsage(usage: Record<string, unknown> | undefined): {
   promptTokens: number
@@ -289,6 +342,18 @@ function normaliseUsage(usage: Record<string, unknown> | undefined): {
   totalTokens: number
 } | null {
   if (!usage) return null
+
+  // V3 path: nested { inputTokens: { total }, outputTokens: { total } }
+  const inputTokens = usage.inputTokens as Record<string, unknown> | undefined
+  const outputTokens = usage.outputTokens as Record<string, unknown> | undefined
+
+  if (inputTokens && typeof inputTokens === 'object') {
+    const prompt = (typeof inputTokens.total === 'number') ? inputTokens.total : 0
+    const completion = (outputTokens && typeof outputTokens.total === 'number') ? outputTokens.total : 0
+    return { promptTokens: prompt, completionTokens: completion, totalTokens: prompt + completion }
+  }
+
+  // V1 path: flat { promptTokens, completionTokens }
   const prompt = (typeof usage.promptTokens === 'number') ? usage.promptTokens : 0
   const completion = (typeof usage.completionTokens === 'number') ? usage.completionTokens : 0
   const total = (typeof usage.totalTokens === 'number') ? usage.totalTokens : (prompt + completion)
@@ -306,14 +371,33 @@ function extractUsage(result: Record<string, unknown>): {
 /**
  * Extract tool calls from the result.
  *
- * The AI SDK's LanguageModelV1FunctionToolCall defines args as a stringified
- * JSON string. We parse it into an object for structured logging. If parsing
- * fails, the raw string is wrapped in a { _raw: ... } object.
+ * Handles two AI SDK result formats:
+ *
+ * **V1 format** (AI SDK v4):
+ *   result.toolCalls is an array of { toolName, args: string (stringified JSON) }
+ *
+ * **V3 format** (AI SDK v5/v6):
+ *   result.content is an array; tool calls are { type: 'tool-call', toolName, input: string }
+ *
+ * In both cases, args/input are parsed into objects for structured logging.
  */
 function extractToolCalls(result: Record<string, unknown>): Array<{
   toolName: string
   args: Record<string, unknown>
 }> {
+  // V3 path: tool calls live inside result.content array
+  const content = result.content as Array<Record<string, unknown>> | undefined
+  if (content && Array.isArray(content)) {
+    const toolCallParts = content.filter((part) => part.type === 'tool-call')
+    if (toolCallParts.length > 0) {
+      return toolCallParts.map((tc) => ({
+        toolName: (tc.toolName as string) ?? 'unknown',
+        args: parseToolArgs(tc.input),
+      }))
+    }
+  }
+
+  // V1 path: result.toolCalls array
   const toolCalls = result.toolCalls as Array<Record<string, unknown>> | undefined
   if (!toolCalls || !Array.isArray(toolCalls)) return []
 
