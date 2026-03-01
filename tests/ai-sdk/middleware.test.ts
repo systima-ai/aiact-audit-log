@@ -108,6 +108,104 @@ function createMockModel(response?: Partial<{
   } as unknown as LanguageModelV1
 }
 
+/**
+ * Mock model that mirrors AI SDK V3 (LanguageModelV3) result shapes,
+ * as used by AI SDK v5/v6 and Mastra.
+ *
+ * Key differences from V1 mocks:
+ * - result.content is an array of content parts (no top-level result.text)
+ * - usage has nested { inputTokens: { total }, outputTokens: { total } }
+ * - finishReason is { unified: string, raw: string | undefined }
+ * - tool calls are in content array as { type: 'tool-call', toolName, input }
+ * - no rawCall property
+ */
+function createV3MockModel(response?: Partial<{
+  content: Array<Record<string, unknown>>
+  usage: { inputTokens: { total: number }; outputTokens: { total: number } }
+  finishReason: { unified: string; raw: string | undefined }
+  modelId: string
+  shouldError: boolean
+}>): LanguageModelV1 {
+  const defaultContent: Array<Record<string, unknown>> = [
+    { type: 'text', text: 'V3 mock response' },
+  ]
+
+  const opts = {
+    content: defaultContent,
+    usage: {
+      inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 50, text: undefined, reasoning: undefined },
+    },
+    finishReason: { unified: 'stop', raw: undefined } as { unified: string; raw: string | undefined },
+    modelId: 'test-provider/test-model-v3',
+    shouldError: false,
+    ...response,
+  }
+
+  return {
+    specificationVersion: 'v3',
+    provider: 'test-provider',
+    modelId: 'test-model-v3',
+    defaultObjectGenerationMode: undefined,
+
+    doGenerate: async () => {
+      if (opts.shouldError) {
+        throw new Error('V3 model error')
+      }
+      return {
+        content: opts.content,
+        usage: opts.usage,
+        finishReason: opts.finishReason,
+        warnings: [],
+        response: {
+          id: 'resp_v3_1',
+          timestamp: new Date(),
+          modelId: opts.modelId,
+        },
+      }
+    },
+
+    doStream: async () => {
+      if (opts.shouldError) {
+        throw new Error('V3 stream error')
+      }
+
+      // Extract text from content parts for streaming
+      const textParts = opts.content
+        .filter((p) => p.type === 'text' && typeof p.text === 'string')
+        .map((p) => p.text as string)
+      const fullText = textParts.join('')
+
+      const readableStream = new ReadableStream({
+        start(controller) {
+          for (const char of fullText) {
+            controller.enqueue({
+              type: 'text-delta',
+              textDelta: char,
+            })
+          }
+          controller.enqueue({
+            type: 'response-metadata',
+            id: 'resp_v3_1',
+            timestamp: new Date(),
+            modelId: opts.modelId,
+          })
+          controller.enqueue({
+            type: 'finish',
+            finishReason: opts.finishReason,
+            usage: opts.usage,
+          })
+          controller.close()
+        },
+      })
+
+      return {
+        stream: readableStream,
+      }
+    },
+  } as unknown as LanguageModelV1
+}
+
 describe('auditMiddleware', () => {
   let logger: AuditLogger
   let storage: MemoryStorage
@@ -390,5 +488,238 @@ describe('auditMiddleware', () => {
     expect(entry.usage.promptTokens).toBe(15)
     expect(entry.usage.completionTokens).toBe(25)
     expect(entry.usage.totalTokens).toBe(40)
+  })
+})
+
+// ── V3 format tests (AI SDK v5/v6, Mastra) ─────────────────
+
+describe('auditMiddleware (V3 result format)', () => {
+  let logger: AuditLogger
+  let storage: MemoryStorage
+
+  /** Helper to get the first logged entry */
+  async function getFirstEntry(store: MemoryStorage): Promise<Record<string, unknown>> {
+    const allFiles = await store.list('')
+    const jsonlFiles = allFiles.filter((k) => k.endsWith('.jsonl'))
+    const data = await store.read(jsonlFiles[jsonlFiles.length - 1])
+    const lines = data.toString('utf-8').trim().split('\n')
+    return JSON.parse(lines[0])
+  }
+
+  afterEach(async () => {
+    await logger.close()
+  })
+
+  it('extracts text from V3 content array', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createV3MockModel({
+      content: [
+        { type: 'text', text: 'First part. ' },
+        { type: 'text', text: 'Second part.' },
+      ],
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    })
+
+    await logger.flush()
+    const entry = await getFirstEntry(storage)
+
+    expect(entry.output).toBeDefined()
+    expect((entry.output as Record<string, unknown>).value).toBe('First part. Second part.')
+  })
+
+  it('extracts usage from V3 nested inputTokens/outputTokens', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createV3MockModel({
+      usage: {
+        inputTokens: { total: 200 },
+        outputTokens: { total: 80 },
+      },
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    })
+
+    await logger.flush()
+    const entry = await getFirstEntry(storage)
+    const usage = entry.usage as Record<string, number>
+
+    expect(usage.promptTokens).toBe(200)
+    expect(usage.completionTokens).toBe(80)
+    expect(usage.totalTokens).toBe(280)
+  })
+
+  it('extracts finishReason from V3 { unified, raw } object', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createV3MockModel({
+      finishReason: { unified: 'length', raw: 'max_tokens' },
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    })
+
+    await logger.flush()
+    const entry = await getFirstEntry(storage)
+    const output = entry.output as Record<string, unknown>
+
+    expect(output.finishReason).toBe('length')
+  })
+
+  it('extracts tool calls from V3 content array', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createV3MockModel({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'tc_v3_1',
+          toolName: 'search',
+          input: '{"query":"UK contract law"}',
+        },
+      ],
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await withAuditContext({ decisionId: 'dec_v3_tools' }, async () => {
+      await wrapped.doGenerate({
+        inputFormat: 'prompt',
+        mode: { type: 'regular' },
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Search' }] }],
+      })
+    })
+
+    await logger.flush()
+
+    const allFiles = await storage.list('')
+    const jsonlFiles = allFiles.filter((k) => k.endsWith('.jsonl'))
+    const data = await storage.read(jsonlFiles[jsonlFiles.length - 1])
+    const lines = data.toString('utf-8').trim().split('\n')
+
+    // Should have inference event + tool_call event
+    expect(lines.length).toBe(2)
+
+    const toolEntry = JSON.parse(lines[1])
+    expect(toolEntry.eventType).toBe('tool_call')
+    expect(toolEntry.toolCall.toolName).toBe('search')
+    expect(toolEntry.toolCall.toolArgs).toEqual({ query: 'UK contract law' })
+  })
+
+  it('falls back to tool-call input for text when no text parts exist', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const structuredJson = '{"risk":"high","clause":"liability"}'
+    const model = createV3MockModel({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'tc_v3_2',
+          toolName: 'json',
+          input: structuredJson,
+        },
+      ],
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await wrapped.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Analyse' }] }],
+    })
+
+    await logger.flush()
+    const entry = await getFirstEntry(storage)
+    const output = entry.output as Record<string, unknown>
+
+    expect(output.value).toBe(structuredJson)
+  })
+
+  it('handles V3 streaming with nested usage and object finishReason', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createV3MockModel({
+      content: [{ type: 'text', text: 'V3 streamed' }],
+      usage: {
+        inputTokens: { total: 50 },
+        outputTokens: { total: 30 },
+      },
+      finishReason: { unified: 'stop', raw: 'end_turn' },
+    })
+    const wrapped = auditMiddleware(model, { logger })
+
+    const { stream } = await wrapped.doStream({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    })
+
+    const reader = stream.getReader()
+    while (true) {
+      const { done } = await reader.read()
+      if (done) break
+    }
+
+    await logger.flush()
+    const entry = await getFirstEntry(storage)
+
+    expect(entry.eventType).toBe('inference')
+    expect((entry.output as Record<string, unknown>).value).toBe('V3 streamed')
+    expect((entry.output as Record<string, unknown>).finishReason).toBe('stop')
+
+    const usage = entry.usage as Record<string, number>
+    expect(usage.promptTokens).toBe(50)
+    expect(usage.completionTokens).toBe(30)
+    expect(usage.totalTokens).toBe(80)
+  })
+
+  it('logs errors from V3 model', async () => {
+    const setup = createTestLogger()
+    logger = setup.logger
+    storage = setup.storage
+
+    const model = createV3MockModel({ shouldError: true })
+    const wrapped = auditMiddleware(model, { logger })
+
+    await expect(
+      wrapped.doGenerate({
+        inputFormat: 'prompt',
+        mode: { type: 'regular' },
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+      }),
+    ).rejects.toThrow('V3 model error')
+
+    await logger.flush()
+    const entry = await getFirstEntry(storage)
+
+    expect(entry.eventType).toBe('inference')
+    expect(entry.error).not.toBeNull()
+    expect((entry.error as Record<string, unknown>).message).toBe('V3 model error')
   })
 })
