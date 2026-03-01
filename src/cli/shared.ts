@@ -4,9 +4,10 @@
 
 import { AuditLogReader } from '../reader.js'
 import { AuditLogger } from '../logger.js'
-import type { S3StorageConfig } from '../storage/interface.js'
+import type { StorageConfig } from '../storage/interface.js'
 
 export interface CLIStorageArgs {
+  dir?: string
   bucket?: string
   region?: string
   prefix?: string
@@ -14,14 +15,23 @@ export interface CLIStorageArgs {
   systemId?: string
 }
 
-export function resolveStorageConfig(args: CLIStorageArgs): S3StorageConfig {
+export function resolveStorageConfig(args: CLIStorageArgs): StorageConfig {
+  const dir = args.dir ?? process.env['AIACT_LOCAL_DIR']
+
+  if (dir) {
+    return {
+      type: 'filesystem',
+      directory: dir,
+    }
+  }
+
   const bucket = args.bucket ?? process.env['AIACT_S3_BUCKET']
   const region = args.region ?? process.env['AIACT_S3_REGION'] ?? 'eu-west-1'
   const prefix = args.prefix ?? process.env['AIACT_S3_PREFIX'] ?? 'aiact-logs'
   const endpoint = args.endpoint ?? process.env['AIACT_S3_ENDPOINT']
 
   if (!bucket) {
-    process.stderr.write('Error: --bucket or AIACT_S3_BUCKET is required\n')
+    process.stderr.write('Error: --dir (or AIACT_LOCAL_DIR) or --bucket (or AIACT_S3_BUCKET) is required\n')
     process.exit(1)
   }
 
@@ -73,6 +83,10 @@ export function printNudge(entryCount: number, days: number): void {
 }
 
 export const storageArgs = {
+  'dir': {
+    type: 'string' as const,
+    description: 'Local directory for audit logs (or AIACT_LOCAL_DIR env var)',
+  },
   'bucket': {
     type: 'string' as const,
     description: 'S3 bucket name (or AIACT_S3_BUCKET env var)',
