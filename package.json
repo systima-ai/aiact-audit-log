@@ -1,7 +1,7 @@
 {
   "name": "@systima/aiact-audit-log",
-  "version": "0.1.5",
-  "description": "Structured, tamper-evident audit logging for AI systems — Article 12 EU AI Act compliance infrastructure",
+  "version": "0.2.0",
+  "description": "Structured, tamper-evident audit logging for AI systems. Article 12 EU AI Act compliance infrastructure.",
   "type": "module",
   "exports": {
     ".": {
@@ -78,6 +78,8 @@
     "article-12",
     "tamper-evident",
     "hash-chain",
+    "object-lock",
+    "worm-storage",
     "ai-sdk",
     "vercel-ai-sdk",
     "llm",
@@ -85,7 +87,7 @@
     "regulated-ai",
     "high-risk-ai"
   ],
-  "author": "Systima <hello@systima.ai> (https://systima.ai)",
+  "author": "Systima <contact@systima.ai> (https://systima.ai)",
   "license": "MIT",
   "repository": {
     "type": "git",
