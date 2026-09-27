@@ -3,12 +3,13 @@
 Structured, tamper-evident audit logging for AI systems. Technical logging capability for EU AI Act Article 12 compliance.
 
 - **Schema mapped to Article 12**: every field is annotated with the Article 12 paragraph it relates to
-- **SHA-256 hash chains**: tamper-evident log integrity that a regulator can independently verify
+- **Hash chains a regulator can verify**: SHA-256 by default, optional HMAC-SHA256 under a key you hold; see [Integrity: what the hash chain proves](#integrity-what-the-hash-chain-proves) for the threat model each covers
+- **Write-once retention**: optional S3 Object Lock on every entry file and chain head, with a health check that verifies the bucket actually has it
 - **Flexible storage**: S3-compatible or local filesystem; logs stay in your infrastructure
 - **AI SDK middleware**: automatic capture for every LLM call via [Vercel AI SDK](https://sdk.vercel.ai)
 - **AsyncLocalStorage context**: correlate multi-step decisions without manual threading
 - **CLI tooling**: query, reconstruct, verify, coverage diagnostics, and compliance export
-- **Retention enforcement**: configurable minimum retention with Article 19(1) floor (180 days)
+- **Retention configuration**: Article 19(1) floor (180 days) with an S3 lifecycle rule applied on startup
 
 ```
 npm install @systima/aiact-audit-log
@@ -145,7 +146,7 @@ const logger = new AuditLogger({
   // Compliance settings (safe defaults)
   retention: {
     minimumDays: 180,               // Default: 180 (Article 19 floor)
-    autoConfigureLifecycle: true,    // Default: true
+    autoConfigureLifecycle: true,    // Default: true; writes an S3 lifecycle rule on init()
   },
 
   // Privacy / GDPR
@@ -164,10 +165,16 @@ const logger = new AuditLogger({
   // Error handling
   onError: 'log-and-continue',     // 'log-and-continue' | 'throw' | (error) => void
 
-  // Immutability
+  // Immutability: S3 Object Lock retention on every entry file and chain head
   objectLock: {
-    enabled: false,                 // Set true if bucket has Object Lock
+    enabled: false,                 // Requires a bucket created with Object Lock enabled
     mode: 'GOVERNANCE',             // 'GOVERNANCE' | 'COMPLIANCE'
+    retainDays: 180,                // Default: retention.minimumDays
+  },
+
+  // Integrity: chain entries under a key instead of bare SHA-256
+  integrity: {
+    hmacKey: process.env.AUDIT_HMAC_KEY,  // Store outside the log bucket
   },
 
   // Periodic health checks
@@ -178,6 +185,69 @@ const logger = new AuditLogger({
   },
 })
 ```
+
+## Integrity: what the hash chain proves
+
+A hash chain detects tampering by a party that cannot recompute it. Who that excludes depends on how you configure the logger, and the difference decides what you can claim in a conformity assessment.
+
+| Configuration | Detects accidental corruption | Detects tampering by someone with write access to the bucket | Proves when an entry was written |
+|---|---|---|---|
+| Unkeyed SHA-256 (default) | Yes | **No** | No |
+| `integrity.hmacKey` set, key held outside the bucket | Yes | Yes, unless the logging process is compromised | No |
+| Unkeyed chain plus Object Lock in `COMPLIANCE` mode | Yes | Yes, for the retention period | No |
+| External anchoring of the chain head | Yes | Yes | Yes, to the anchor's precision |
+
+The default chain takes no secret, so anyone who can overwrite objects under the log prefix can modify an entry and recompute every downstream `hash` and `prevHash`. `verifyChain` then reports the replacement as valid. In most deployments the credential with `s3:PutObject` on the prefix is the one the logging service already uses, so treat the default as tamper-evidence against corruption and casual modification, not as tamper-proofing.
+
+Three mechanisms close that gap, and they are independent of each other.
+
+**Object Lock** is the strongest, and the only one that holds when the logging process itself is compromised:
+
+```typescript
+const logger = new AuditLogger({
+  systemId: 'loan-scorer-v2',
+  storage: { type: 's3', bucket: 'my-audit-logs', region: 'eu-west-1' },
+  retention: { minimumDays: 2555 },
+  objectLock: { enabled: true, mode: 'COMPLIANCE' },
+})
+
+await logger.init()
+```
+
+The bucket must have been **created** with Object Lock enabled; it cannot be turned on afterwards. Every entry file and every chain head write then carries `ObjectLockMode` and a retain-until date derived from `retainDays`, defaulting to `retention.minimumDays`. In `COMPLIANCE` mode no principal, including the root account, can delete or overwrite a locked object version before that date. The `object_lock_configured` health check fails when `enabled` is set but the bucket lacks Object Lock, so a mismatch surfaces rather than silently doing nothing. Constructing a logger with `objectLock.enabled` against the filesystem backend throws `ComplianceConfigError`, since that backend cannot enforce write-once retention.
+
+**HMAC chaining** raises the bar for an attacker who reaches the bucket but not the key:
+
+```typescript
+const logger = new AuditLogger({
+  systemId: 'loan-scorer-v2',
+  storage: { type: 's3', bucket: 'my-audit-logs', region: 'eu-west-1' },
+  integrity: { hmacKey: process.env.AUDIT_HMAC_KEY },
+})
+```
+
+Verification needs the same key:
+
+```typescript
+const reader = new AuditLogReader({
+  storage: { type: 's3', bucket: 'my-audit-logs', region: 'eu-west-1' },
+  systemId: 'loan-scorer-v2',
+  integrity: { hmacKey: process.env.AUDIT_HMAC_KEY },
+})
+```
+
+Keep the key outside the log bucket and outside the credential that writes to it; a key stored beside the data it protects adds nothing an attacker does not already hold. Rotating it breaks verification of entries written under the previous key, so treat it as long-lived. The logging process necessarily holds the key, so this does not defend against compromise of that process. Entries record `hashAlgorithm: 'hmac-sha256'`, but verification always uses the key you supply rather than the field, so stripping the field cannot downgrade a chain to unkeyed.
+
+**External anchoring** is the only one that establishes *when* entries existed:
+
+```typescript
+const head = logger.getChainHead()
+// { seq, hash, systemId, updatedAt, hashAlgorithm }
+// Publish periodically to a separate account, an RFC 3161 timestamping
+// authority, or a transparency log.
+```
+
+Neither the chain nor Object Lock carries a trusted timestamp. Anchoring the head into a domain the logging credential cannot reach gives evidence that survives full compromise of the log bucket.
 
 #### `logger.log(input)`
 
@@ -196,6 +266,21 @@ Flush remaining entries and release all resources. Call on shutdown.
 #### `logger.healthCheck()`
 
 Run a health check against the storage backend. Returns `HealthCheckResult` with individual check statuses.
+
+| Check | Fails when |
+|---|---|
+| `s3_write_access` | The backend rejects a probe write |
+| `s3_read_access` | The probe object cannot be read back |
+| `chain_head_consistency` | The chain head is missing after entries were written, or names a different `systemId` |
+| `schema_version_match` | The schema marker object is absent (warning) |
+| `object_lock_configured` | `objectLock.enabled` is set but the bucket does not have Object Lock enabled, or its configuration cannot be read |
+| `lifecycle_policy_exists` | No enabled lifecycle rule covers the prefix, or the rule expires objects sooner than `retention.minimumDays` |
+
+`object_lock_configured` passes when Object Lock is not requested, and says so explicitly: stored objects can be overwritten. `lifecycle_policy_exists` reports "not applicable" on backends with no lifecycle layer, such as the filesystem backend.
+
+#### `logger.getChainHead()`
+
+Returns the current `ChainHead` (`seq`, `hash`, `systemId`, `updatedAt`, `hashAlgorithm`) for anchoring outside the log bucket. See [Integrity](#integrity-what-the-hash-chain-proves).
 
 ### `AuditLogReader`
 
@@ -216,6 +301,8 @@ const devReader = new AuditLogReader({
   systemId: 'loan-scorer-v2',
 })
 ```
+
+Pass `integrity: { hmacKey }` when the logs were written under a key, otherwise verification fails for every entry.
 
 #### `reader.query(options?)`
 
@@ -329,7 +416,7 @@ All commands accept storage flags for either local filesystem or S3:
 - **Local filesystem**: `--dir` (or `AIACT_LOCAL_DIR` env var)
 - **S3**: `--bucket`, `--region`, `--prefix`, `--endpoint` (or `AIACT_S3_BUCKET`, `AIACT_S3_REGION`, `AIACT_S3_PREFIX`, `AIACT_S3_ENDPOINT` env vars)
 
-All commands also accept `--system-id` (or `AIACT_SYSTEM_ID`).
+All commands also accept `--system-id` (or `AIACT_SYSTEM_ID`), and `--hmac-key` (or `AIACT_HMAC_KEY`) for logs written with `integrity.hmacKey`. Without the key, `verify` reports a chain break on the first entry.
 
 ### Commands
 
@@ -408,8 +495,9 @@ Every log entry follows a schema annotated with references to the Article 12 par
 | `parameters` | object or null | 12(2)(a) configuration tracking |
 | `captureMethod` | `'middleware'` / `'manual'` / `'context'` | Coverage analysis |
 | `seq` | number | 12(1) event ordering |
-| `prevHash` | SHA-256 hex | Tamper evidence |
-| `hash` | SHA-256 hex | Tamper evidence |
+| `prevHash` | hex digest | Tamper evidence ([scope](#integrity-what-the-hash-chain-proves)) |
+| `hash` | hex digest | Tamper evidence ([scope](#integrity-what-the-hash-chain-proves)) |
+| `hashAlgorithm` | `'hmac-sha256'`, absent when SHA-256 | Records which function chained the entry |
 
 Extended fields (optional): `humanIntervention`, `stepIndex`, `parentEntryId`, `toolCall`, `referenceDatabase`, `matchResult`, `metadata`.
 
@@ -425,6 +513,8 @@ Event types: `inference`, `tool_call`, `tool_result`, `human_intervention`, `sys
 | Employment | 1095 (3 years) | Tribunal limitation periods |
 
 For systems processing personal data, enable `pii.hashInputs` and `pii.hashOutputs` to store SHA-256 hashes instead of raw content (GDPR Article 5(1)(c) data minimisation).
+
+Object Lock interacts with long retention periods and with erasure requests. `COMPLIANCE` mode makes an object undeletable until its retain-until date by any principal, which is the point, but it also means a GDPR Article 17 erasure request cannot be satisfied by deleting the object. For systems logging personal data under a long retention period, hash the inputs and outputs so the locked objects hold no raw personal data, or use `GOVERNANCE` mode, where a specifically privileged principal can remove an object and that removal is itself auditable.
 
 ## From Logging to Compliance
 

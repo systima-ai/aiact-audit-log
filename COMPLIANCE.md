@@ -10,7 +10,7 @@ This document defines the precise boundary of what the library covers and what i
 
 - **Article 12(1) — technical capability for automatic recording**: Once configured, the logger captures events without manual intervention and operates over the lifetime of the system. The middleware integration automates capture for LLM calls. However, Article 12(1) requires recording of all relevant "events," not only LLM calls. Non-LLM events (human interventions, session boundaries, system events) require explicit instrumentation by the integrator. The package provides the mechanism; the integrator must ensure all relevant event types are captured.
 - **Article 12(2) — data infrastructure for traceability**: The schema captures fields that can support risk identification (12(2)(a)), post-market monitoring (12(2)(b)), and deployer monitoring (12(2)(c)). However, whether the captured events are actually "relevant" for these purposes depends on what the integrator instruments and how the system is deployed. The package provides the data capture layer; it does not determine what constitutes a risk-relevant event (that is domain-specific), implement monitoring procedures, or provide deployer access controls.
-- **Article 19(1) — retention floor enforcement**: When correctly configured, the logger enforces a 180-day minimum and stores logs in customer-controlled infrastructure. Ongoing retention depends on operational discipline (S3 lifecycle policies, IAM permissions).
+- **Article 19(1) — retention floor enforcement**: The logger refuses to start below a 180-day retention setting, configures a matching S3 lifecycle rule on initialisation, and stores logs in customer-controlled infrastructure. A lifecycle rule bounds how long objects are kept but does not prevent early deletion; that requires Object Lock or restrictive IAM. Ongoing retention therefore still depends on operational discipline, and the health checks report drift rather than preventing it.
 
 ### 1.2 This package supports but does not implement
 
@@ -26,8 +26,9 @@ Installing the package is not sufficient for Article 12 compliance. The deployin
 
 1. **Ensure coverage**: all relevant events must be logged. This includes every inference call, tool invocation, system error, human override, configuration change, and session boundary. The middleware integration automates capture for LLM calls; other event types require explicit instrumentation. The coverage diagnostic helps identify gaps.
 2. **Define "relevant events"**: Article 12(2)(a) requires logging events "relevant for identifying situations that may result in the AI system presenting a risk." What constitutes a relevant event depends on the system's risk profile and intended purpose. The organisation must define this, not the library.
-3. **Maintain operational governance**: the library validates configuration on startup and provides health checks, but cannot prevent an operations team from deleting S3 lifecycle policies, disabling Object Lock, or misconfiguring IAM permissions. Ongoing compliance depends on operational discipline.
-4. **Integrate with broader compliance architecture**: the logs must feed into the organisation's risk management system (Article 9), post-market monitoring plan (Article 72), and technical documentation (Annex IV).
+3. **Maintain operational governance**: the library validates configuration on startup, requests Object Lock retention when configured to, and provides health checks that verify the bucket actually has Object Lock and a lifecycle rule. It cannot prevent an operations team from removing a lifecycle policy, granting over-broad IAM permissions, or storing an HMAC key in the same account as the logs it protects. The health checks detect several of these after the fact; none of them is prevented. Ongoing compliance depends on operational discipline.
+4. **Protect the integrity mechanism itself**: decide explicitly which of the three mechanisms in section 4 you rely on, and make sure the deployment matches. An `objectLock.mode` of `COMPLIANCE` on a bucket without Object Lock, or an `integrity.hmacKey` stored in the log bucket, is a configuration that describes a protection it does not provide.
+5. **Integrate with broader compliance architecture**: the logs must feed into the organisation's risk management system (Article 9), post-market monitoring plan (Article 72), and technical documentation (Annex IV).
 
 ## 2. What This Package Does Not Cover
 
@@ -54,7 +55,7 @@ The following obligations require organisational processes that a logging librar
 | `systemId` | Identifies which AI system produced the log |
 | `timestamp` (ISO 8601) | Records when each event occurred |
 | `seq` (monotonic integer) | Establishes event ordering |
-| `prevHash` + `hash` (SHA-256) | Provides tamper evidence for trustworthy recording |
+| `prevHash` + `hash` | Provides tamper evidence for trustworthy recording, to the extent set out in section 4 |
 | `captureMethod` | Documents how the event was captured (middleware = automatic) |
 
 The middleware integration (`auditMiddleware`) automates capture for LLM calls by intercepting every model invocation without manual instrumentation. Other event types (human interventions, session boundaries, system events) require explicit `logger.log()` calls by the integrator.
@@ -139,10 +140,14 @@ These fields are optional in the schema. For biometric systems where they are le
 
 | Mechanism | How it supports the requirement |
 |---|---|
-| `retention.minimumDays` default of 180 | Enforces the six-month floor |
+| `retention.minimumDays` default of 180 | Sets the six-month floor for the configuration and the lifecycle rule |
 | `ComplianceConfigError` on sub-minimum | Refuses to initialise below 180 days without explicit acknowledgement |
-| S3 lifecycle policy management | Automates retention enforcement at the storage layer |
-| Health check: `lifecycle_policy_exists` | Detects post-deployment drift in retention configuration |
+| S3 lifecycle policy configuration on `init()` | Writes a lifecycle rule expiring objects under the prefix after `minimumDays`, when `retention.autoConfigureLifecycle` is true (the default) and the credential holds `s3:PutLifecycleConfiguration` |
+| Health check: `lifecycle_policy_exists` | Fails when no enabled rule covers the prefix, or when the rule expires objects sooner than the configured retention |
+
+A lifecycle rule sets an upper bound on how long objects are kept; on its own it does not stop anyone from deleting them sooner. Retention against deliberate deletion requires Object Lock, or an IAM policy that withholds `s3:DeleteObject` from every principal that does not need it.
+
+When the runtime credential lacks `s3:PutLifecycleConfiguration`, configuration fails and the failure is reported through `onError` rather than silently ignored. Either grant the permission, or set `retention.autoConfigureLifecycle: false` and apply the rule from a deployment script using the exported `configureRetentionPolicy` helper. The health check reports either way, so drift is visible regardless of which route you take.
 
 ### Article 19(2): Financial services
 
@@ -152,18 +157,39 @@ Supported via `retention.minimumDays: 2555` (7 years) for MiFID II compliance. T
 
 ## 4. Hash Chain Integrity
 
-Each log entry participates in a SHA-256 hash chain:
+Each log entry participates in a hash chain:
 
-1. The genesis entry's `prevHash` is the SHA-256 of `@systima/aiact-audit-log:genesis:{systemId}`
+1. The genesis entry's `prevHash` is the digest of `@systima/aiact-audit-log:genesis:{systemId}`
 2. Each subsequent entry's `prevHash` is the `hash` of the previous entry
-3. Each entry's `hash` is the SHA-256 of the entry serialised with deterministic key ordering (excluding the `hash` field itself)
+3. Each entry's `hash` is the digest of the entry serialised with deterministic key ordering (excluding the `hash` field itself)
 
 If any entry is modified, deleted, or inserted:
 - The `hash` of the modified entry will not match its content
 - The `prevHash` of the next entry will not match the `hash` of the modified entry
 - The `verify` CLI command reports the break at the exact position
 
-Combined with S3 Object Lock (Compliance mode), this provides strong evidence of log integrity for conformity assessment under Articles 43-44.
+### What the chain does and does not prove
+
+A hash chain detects tampering by a party that cannot recompute it. Who that excludes depends on configuration, and the distinction matters for what you can claim in a conformity assessment.
+
+| Configuration | Detects accidental corruption | Detects tampering by someone with write access to the bucket | Proves when an entry was written |
+|---|---|---|---|
+| Unkeyed SHA-256 (default) | Yes | **No** | No |
+| `integrity.hmacKey` set, key held outside the bucket | Yes | Yes, unless the logging process itself is compromised | No |
+| Unkeyed chain plus S3 Object Lock in COMPLIANCE mode | Yes | Yes, for the duration of the retention period | No |
+| External anchoring of the chain head | Yes | Yes | Yes, to the anchor's precision |
+
+The default unkeyed chain takes no secret. A party who can overwrite objects in the log prefix can therefore modify an entry, recompute its `hash`, and recompute every downstream `prevHash` and `hash`, producing a replacement chain that `verifyChain` reports as valid. In practice the credential that holds `s3:PutObject` for the prefix is the same one the logging service uses, so this is not a remote threat model. **Do not describe an unkeyed chain on rewritable storage as tamper-proof.** It is tamper-evident against corruption and casual modification, and no more.
+
+Three mechanisms close the gap, and they are independent:
+
+- **`integrity.hmacKey`** chains entries with HMAC-SHA256. Recomputation then requires the key as well as bucket access. Store the key outside the log bucket and outside the credential that writes to it; a key sitting next to the data it protects provides nothing. This does not defend against compromise of the logging process, which necessarily holds the key.
+- **`objectLock.enabled`** requests S3 Object Lock retention on every entry file and on the chain head. In COMPLIANCE mode, no principal, including the root account, can delete or overwrite a locked object version before its retain-until date. This is the strongest of the three and the only one that holds against a fully compromised logging process.
+- **External anchoring.** `logger.getChainHead()` returns the current head. Publishing it periodically into a separate trust domain, such as a different AWS account, an RFC 3161 timestamping authority, or a transparency log, produces evidence that does not depend on the log bucket or its credentials, and is the only one of the three that establishes *when* entries existed.
+
+The `object_lock_configured` health check verifies that a bucket actually has Object Lock enabled when `objectLock.enabled` is set, and fails when it does not. Object Lock can only be enabled at bucket creation, so a bucket that lacks it must be replaced rather than reconfigured.
+
+For conformity assessment under Articles 43-44, the chain and its verification tooling are evidence of integrity to the extent described above. State which configuration is in use; the assessment is conducted by a notified body or through internal procedures, not by a logging library.
 
 ## 5. Coverage Diagnostic
 
