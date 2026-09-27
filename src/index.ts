@@ -14,6 +14,7 @@ export type {
   PIIOptions,
   BatchingOptions,
   ObjectLockOptions,
+  IntegrityOptions,
   HealthCheckOptions,
   ComplianceDrift,
   ErrorHandler,
@@ -45,10 +46,12 @@ export type {
   ToolCallData,
   MatchResult,
 } from './schema.js'
+export type { HashAlgorithm } from './schema.js'
 export {
   EVENT_TYPES,
   CAPTURE_METHODS,
   HUMAN_INTERVENTION_TYPES,
+  HASH_ALGORITHMS,
   SchemaValidationError,
   validateLogEntryInput,
   validateAuditLogEntry,
@@ -64,8 +67,13 @@ export {
   verifyChain,
   verifyChainFromGenesis,
   sha256,
+  hmacSha256,
 } from './hash-chain.js'
-export type { ChainHead, ChainVerificationResult } from './hash-chain.js'
+export type {
+  ChainHead,
+  ChainVerificationResult,
+  ChainKeyOptions,
+} from './hash-chain.js'
 
 export { analyseCoverage } from './coverage.js'
 export type { CoverageReport, CoverageWarning, CoverageOptions } from './coverage.js'
@@ -83,7 +91,18 @@ export type {
   S3StorageConfig,
   FileSystemStorageConfig,
   StorageConfig,
+  WriteOptions,
+  ObjectLockMode,
+  ObjectLockWriteOptions,
+  ObjectLockStatus,
+  RetentionPolicyStatus,
 } from './storage/interface.js'
+
+export {
+  configureRetentionPolicy,
+  checkRetentionPolicy,
+  retentionRuleId,
+} from './utils/retention.js'
 
 export { FileSystemStorage } from './storage/filesystem.js'
 export { MemoryStorage } from './storage/memory.js'

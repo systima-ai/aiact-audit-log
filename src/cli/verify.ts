@@ -19,6 +19,7 @@ export const verifyCommand = defineCommand({
       prefix: args['prefix'],
       endpoint: args['endpoint'],
       systemId: args['system-id'],
+      hmacKey: args['hmac-key'],
     })
 
     const result = await reader.verifyChain({

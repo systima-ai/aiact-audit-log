@@ -20,6 +20,7 @@ export const statsCommand = defineCommand({
       prefix: args['prefix'],
       endpoint: args['endpoint'],
       systemId: args['system-id'],
+      hmacKey: args['hmac-key'],
     })
 
     const stats = await reader.stats({

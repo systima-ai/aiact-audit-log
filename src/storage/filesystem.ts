@@ -5,8 +5,11 @@
  * Useful for local development, testing, and CLI inspection of logs
  * without requiring S3 or MinIO.
  *
- * Not recommended for production high-risk AI systems where
- * tamper-evidence and durability guarantees require S3 Object Lock.
+ * Not recommended for production high-risk AI systems. This backend cannot
+ * enforce write-once retention, so it implements none of the optional
+ * retention capabilities on StorageBackend; a logger configured with
+ * objectLock.enabled against it throws ComplianceConfigError rather than
+ * writing unprotected objects.
  */
 
 import { promises as fs } from 'node:fs'

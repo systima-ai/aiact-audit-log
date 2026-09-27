@@ -3,10 +3,20 @@
  *
  * Supports Article 12(1): automatic recording of events over the
  * lifetime of the system. Entries are batched in memory and flushed
- * to storage (S3 or local filesystem) with SHA-256 hash chains.
+ * to storage (S3 or local filesystem) in a hash chain.
+ *
+ * What that chain proves depends on configuration. See hash-chain.ts for the
+ * threat model each of integrity.hmacKey, objectLock, and external anchoring
+ * of getChainHead() covers; the default unkeyed chain on rewritable storage is
+ * the weakest of them.
  */
 
-import type { StorageBackend, StorageConfig } from './storage/interface.js'
+import type {
+  StorageBackend,
+  StorageConfig,
+  WriteOptions,
+  ObjectLockMode,
+} from './storage/interface.js'
 import { S3Storage } from './storage/s3.js'
 import { FileSystemStorage } from './storage/filesystem.js'
 import type {
@@ -16,10 +26,16 @@ import type {
   CaptureMethod,
   InputData,
   OutputData,
+  HashAlgorithm,
 } from './schema.js'
 import { validateLogEntryInput } from './schema.js'
 import { generateUUIDv7 } from './utils/uuid.js'
-import { computeGenesisHash, computeEntryHash, type ChainHead } from './hash-chain.js'
+import {
+  computeGenesisHash,
+  computeEntryHash,
+  type ChainHead,
+  type ChainKeyOptions,
+} from './hash-chain.js'
 import { getAuditContext, MissingDecisionIdError } from './context.js'
 import { ComplianceConfigError } from './errors.js'
 import { sha256 } from './hash-chain.js'
@@ -44,8 +60,35 @@ export interface BatchingOptions {
 }
 
 export interface ObjectLockOptions {
+  /**
+   * Request S3 Object Lock retention on every audit object written.
+   *
+   * Requires a bucket created with Object Lock enabled (which implies
+   * versioning) and a credential holding s3:PutObjectRetention. When the
+   * bucket does not have Object Lock, writes fail rather than silently
+   * proceeding unprotected; the object_lock_configured health check reports
+   * the mismatch up front.
+   */
   enabled?: boolean
-  mode?: 'GOVERNANCE' | 'COMPLIANCE'
+  mode?: ObjectLockMode
+  /**
+   * Days to retain each object for. Defaults to retention.minimumDays, so the
+   * lock expires at the same point the lifecycle rule becomes free to expire
+   * the object.
+   */
+  retainDays?: number
+}
+
+export interface IntegrityOptions {
+  /**
+   * Chain entries with HMAC-SHA256 under this key instead of bare SHA-256.
+   *
+   * Store the key outside the log bucket and outside the credential that can
+   * write to it, otherwise it provides no protection an attacker does not
+   * already hold. Rotating the key breaks verification of entries written
+   * under the previous key, so treat it as long-lived.
+   */
+  hmacKey?: string
 }
 
 export interface HealthCheckOptions {
@@ -70,6 +113,7 @@ export interface AuditLoggerConfig {
   batching?: BatchingOptions
   onError?: ErrorHandler
   objectLock?: ObjectLockOptions
+  integrity?: IntegrityOptions
   healthCheck?: HealthCheckOptions
 }
 
@@ -87,6 +131,8 @@ export class AuditLogger {
   private readonly batching: Required<BatchingOptions>
   private readonly onError: ErrorHandler
   private readonly objectLock: Required<ObjectLockOptions>
+  private readonly chainKey: ChainKeyOptions
+  private readonly hashAlgorithm: HashAlgorithm
 
   private buffer: AuditLogEntryExtended[] = []
   private seq: number = 0
@@ -147,9 +193,22 @@ export class AuditLogger {
     this.objectLock = {
       enabled: config.objectLock?.enabled ?? false,
       mode: config.objectLock?.mode ?? 'GOVERNANCE',
+      retainDays: config.objectLock?.retainDays ?? retentionDays,
     }
 
-    this.prevHash = computeGenesisHash(this.systemId)
+    if (this.objectLock.enabled && !this.storage.getObjectLockStatus) {
+      throw new ComplianceConfigError(
+        'objectLock.enabled is set, but the configured storage backend cannot enforce write-once retention. ' +
+        'Object Lock requires the S3 backend and a bucket created with Object Lock enabled.',
+      )
+    }
+
+    this.chainKey = config.integrity?.hmacKey
+      ? { hmacKey: config.integrity.hmacKey }
+      : {}
+    this.hashAlgorithm = this.chainKey.hmacKey ? 'hmac-sha256' : 'sha256'
+
+    this.prevHash = computeGenesisHash(this.systemId, this.chainKey)
 
     this.setupShutdownHooks()
   }
@@ -172,6 +231,8 @@ export class AuditLogger {
       this.handleError(new Error(`Failed to initialise logger: ${error instanceof Error ? error.message : String(error)}`))
       this.initialised = true
     }
+
+    await this.applyRetentionPolicy()
 
     if (this.config.healthCheck?.enabled) {
       const intervalMs = this.config.healthCheck.intervalMs ?? 3_600_000
@@ -231,6 +292,7 @@ export class AuditLogger {
       captureMethod,
       seq: this.seq,
       prevHash: this.prevHash,
+      ...(this.hashAlgorithm === 'sha256' ? {} : { hashAlgorithm: this.hashAlgorithm }),
       ...(input.humanIntervention ? { humanIntervention: input.humanIntervention } : {}),
       ...(input.stepIndex !== undefined ? { stepIndex: input.stepIndex } : {}),
       ...(input.parentEntryId ? { parentEntryId: input.parentEntryId } : {}),
@@ -242,7 +304,7 @@ export class AuditLogger {
         : {}),
     }
 
-    const hash = computeEntryHash(entryWithoutHash)
+    const hash = computeEntryHash(entryWithoutHash, this.chainKey)
     const entry: AuditLogEntryExtended = { ...entryWithoutHash, hash }
 
     this.seq++
@@ -310,6 +372,8 @@ export class AuditLogger {
     checks.push(await this.checkReadAccess())
     checks.push(await this.checkChainHeadConsistency())
     checks.push(await this.checkSchemaVersion())
+    checks.push(await this.checkObjectLock())
+    checks.push(await this.checkRetentionPolicy())
 
     const healthy = checks.every((c) => c.status === 'pass')
 
@@ -356,6 +420,24 @@ export class AuditLogger {
 
   getPrevHash(): string {
     return this.prevHash
+  }
+
+  /**
+   * The current chain head.
+   *
+   * Neither the hash chain nor Object Lock proves when an entry was written.
+   * Publish this periodically into a separate trust domain (a different
+   * account, a timestamping authority, or a transparency log) to obtain
+   * evidence that does not depend on the log bucket or its credentials.
+   */
+  getChainHead(): ChainHead {
+    return {
+      seq: this.seq - 1,
+      hash: this.prevHash,
+      systemId: this.systemId,
+      updatedAt: new Date().toISOString(),
+      hashAlgorithm: this.hashAlgorithm,
+    }
   }
 
   // ── Internal methods ────────────────────────────────────
@@ -446,33 +528,49 @@ export class AuditLogger {
     }
 
     const key = this.currentFilePath()
+    const options = this.writeOptions()
 
     if (this.currentFileSize > 0) {
       try {
         const existing = await this.storage.read(key)
         const combined = Buffer.concat([existing, data])
-        await this.storage.write(key, combined)
+        await this.storage.write(key, combined, options)
         this.currentFileSize = combined.length
       } catch {
-        await this.storage.write(key, data)
+        await this.storage.write(key, data, options)
         this.currentFileSize = data.length
       }
     } else {
-      await this.storage.write(key, data)
+      await this.storage.write(key, data, options)
       this.currentFileSize = data.length
     }
   }
 
-  private async persistChainHead(): Promise<void> {
-    const head: ChainHead = {
-      seq: this.seq - 1,
-      hash: this.prevHash,
-      systemId: this.systemId,
-      updatedAt: new Date().toISOString(),
-    }
+  /**
+   * Retention options for writes that carry audit evidence.
+   *
+   * Applied to entry files and the chain head. Operational objects (the health
+   * probe, the schema marker, the config snapshot) are written without a lock,
+   * so a repeatedly restarted process does not accumulate locked versions of
+   * files that are not evidence.
+   */
+  private writeOptions(): WriteOptions | undefined {
+    if (!this.objectLock.enabled) return undefined
 
-    const data = Buffer.from(JSON.stringify(head, null, 2), 'utf-8')
-    await this.storage.write(`${this.systemId}/_chain/head.json`, data)
+    const retainUntil = new Date(
+      Date.now() + this.objectLock.retainDays * 24 * 60 * 60 * 1000,
+    )
+
+    return { objectLock: { mode: this.objectLock.mode, retainUntil } }
+  }
+
+  private async persistChainHead(): Promise<void> {
+    const data = Buffer.from(JSON.stringify(this.getChainHead(), null, 2), 'utf-8')
+    await this.storage.write(
+      `${this.systemId}/_chain/head.json`,
+      data,
+      this.writeOptions(),
+    )
   }
 
   private async loadChainHead(): Promise<void> {
@@ -519,6 +617,26 @@ export class AuditLogger {
       await this.storage.write(configKey, Buffer.from(JSON.stringify(configSnapshot, null, 2)))
     } catch {
       // Non-critical; metadata write failure should not block logging
+    }
+  }
+
+  private async applyRetentionPolicy(): Promise<void> {
+    if (!this.retention.autoConfigureLifecycle) return
+
+    const configure = this.storage.configureRetentionPolicy
+    if (!configure) return
+
+    try {
+      await configure.call(this.storage, this.retention.minimumDays)
+    } catch (error) {
+      this.handleError(
+        new Error(
+          `Failed to configure the ${this.retention.minimumDays}-day retention lifecycle policy: ` +
+          `${error instanceof Error ? error.message : String(error)}. ` +
+          'Article 19(1) retention is not enforced at the storage layer until this policy exists. ' +
+          'Grant s3:PutLifecycleConfiguration, or set retention.autoConfigureLifecycle to false and manage the policy yourself.',
+        ),
+      )
     }
   }
 
@@ -621,6 +739,98 @@ export class AuditLogger {
         name: 'chain_head_consistency',
         status: 'warn',
         message: `Chain head check failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
+  private async checkObjectLock(): Promise<HealthCheck> {
+    const name = 'object_lock_configured'
+
+    if (!this.objectLock.enabled) {
+      return {
+        name,
+        status: 'pass',
+        message: 'Not requested (objectLock.enabled is false); stored objects can be overwritten',
+      }
+    }
+
+    const getStatus = this.storage.getObjectLockStatus
+    if (!getStatus) {
+      return {
+        name,
+        status: 'fail',
+        message: 'Object Lock requested, but this storage backend cannot enforce write-once retention',
+      }
+    }
+
+    try {
+      const status = await getStatus.call(this.storage)
+
+      if (!status.enabled) {
+        return {
+          name,
+          status: 'fail',
+          message:
+            `Object Lock requested in ${this.objectLock.mode} mode, but the bucket does not have Object Lock enabled. ` +
+            'Object Lock can only be enabled when a bucket is created, so this bucket must be replaced.',
+        }
+      }
+
+      return {
+        name,
+        status: 'pass',
+        message: `Bucket Object Lock enabled; writing in ${this.objectLock.mode} mode for ${this.objectLock.retainDays} days`,
+      }
+    } catch (error) {
+      return {
+        name,
+        status: 'fail',
+        message: `Object Lock check failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
+  private async checkRetentionPolicy(): Promise<HealthCheck> {
+    const name = 'lifecycle_policy_exists'
+
+    const getStatus = this.storage.getRetentionPolicyStatus
+    if (!getStatus) {
+      return {
+        name,
+        status: 'pass',
+        message: 'Not applicable; this storage backend has no lifecycle policy layer',
+      }
+    }
+
+    try {
+      const status = await getStatus.call(this.storage)
+
+      if (!status.policyExists) {
+        return {
+          name,
+          status: 'fail',
+          message: `No enabled lifecycle rule covers this prefix; the ${this.retention.minimumDays}-day retention period is not enforced at the storage layer`,
+        }
+      }
+
+      if (status.configuredDays !== null && status.configuredDays < this.retention.minimumDays) {
+        return {
+          name,
+          status: 'fail',
+          message: `Lifecycle rule expires objects after ${status.configuredDays} days, below the configured retention of ${this.retention.minimumDays} days`,
+        }
+      }
+
+      return {
+        name,
+        status: 'pass',
+        message: `Lifecycle rule expires objects after ${status.configuredDays} days`,
+      }
+    } catch (error) {
+      return {
+        name,
+        status: 'warn',
+        message: `Lifecycle policy check failed: ${error instanceof Error ? error.message : String(error)}`,
       }
     }
   }

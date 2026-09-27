@@ -14,6 +14,7 @@ import {
   verifyChain,
   verifyChainFromGenesis,
   type ChainVerificationResult,
+  type ChainKeyOptions,
 } from './hash-chain.js'
 
 // ── Configuration ───────────────────────────────────────────
@@ -21,6 +22,13 @@ import {
 export interface AuditLogReaderConfig {
   storage: StorageConfig
   systemId: string
+  /**
+   * The HMAC key the logs were written under, when the logger was configured
+   * with integrity.hmacKey. Verification uses this key rather than each
+   * entry's own hashAlgorithm field, so an attacker cannot downgrade entries
+   * to unkeyed SHA-256 and recompute the chain.
+   */
+  integrity?: ChainKeyOptions
 }
 
 // ── Query types ─────────────────────────────────────────────
@@ -64,9 +72,11 @@ export interface StatsResult {
 export class AuditLogReader {
   private readonly storage: StorageBackend
   private readonly systemId: string
+  private readonly chainKey: ChainKeyOptions
 
   constructor(config: AuditLogReaderConfig) {
     this.systemId = config.systemId
+    this.chainKey = config.integrity?.hmacKey ? { hmacKey: config.integrity.hmacKey } : {}
 
     if (config.storage.type === 's3') {
       this.storage = new S3Storage(config.storage)
@@ -118,7 +128,7 @@ export class AuditLogReader {
       .filter((e) => e.decisionId === decisionId)
       .sort((a, b) => a.seq - b.seq)
 
-    const integrity = verifyChain(entries)
+    const integrity = verifyChain(entries, this.chainKey)
 
     const timeline: TimelineEntry[] = entries.map((e) => ({
       timestamp: e.timestamp,
@@ -140,7 +150,7 @@ export class AuditLogReader {
     to?: string
   }): Promise<ChainVerificationResult> {
     const entries = await this.loadEntries(options?.from, options?.to)
-    return verifyChainFromGenesis(entries, this.systemId)
+    return verifyChainFromGenesis(entries, this.systemId, this.chainKey)
   }
 
   async stats(options?: { from?: string; to?: string }): Promise<StatsResult> {

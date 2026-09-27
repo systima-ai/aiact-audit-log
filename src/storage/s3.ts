@@ -10,9 +10,48 @@ import {
   GetObjectCommand,
   ListObjectsV2Command,
   HeadObjectCommand,
+  GetObjectLockConfigurationCommand,
+  type PutObjectCommandInput,
 } from '@aws-sdk/client-s3'
-import type { StorageBackend, ObjectMetadata, S3StorageConfig } from './interface.js'
+import type {
+  StorageBackend,
+  ObjectMetadata,
+  S3StorageConfig,
+  WriteOptions,
+  ObjectLockStatus,
+  RetentionPolicyStatus,
+} from './interface.js'
 import { StorageError } from '../errors.js'
+import { configureRetentionPolicy, checkRetentionPolicy } from '../utils/retention.js'
+
+/**
+ * Build the PutObject input for an audit write.
+ *
+ * Exported so the lock parameters can be asserted without an S3 endpoint.
+ * Before v0.2.0 the objectLock configuration never reached this call, so a
+ * deployer requesting COMPLIANCE mode received no protection at all.
+ */
+export function buildPutObjectInput(
+  bucket: string,
+  fullKey: string,
+  data: Buffer,
+  options?: WriteOptions,
+): PutObjectCommandInput {
+  return {
+    Bucket: bucket,
+    Key: fullKey,
+    Body: data,
+    ContentType: fullKey.endsWith('.jsonl')
+      ? 'application/x-ndjson'
+      : 'application/json',
+    ...(options?.objectLock
+      ? {
+          ObjectLockMode: options.objectLock.mode,
+          ObjectLockRetainUntilDate: options.objectLock.retainUntil,
+        }
+      : {}),
+  }
+}
 
 export class S3Storage implements StorageBackend {
   private readonly client: S3Client
@@ -45,17 +84,12 @@ export class S3Storage implements StorageBackend {
     return `${this.prefix}/${key}`
   }
 
-  async write(key: string, data: Buffer): Promise<void> {
+  async write(key: string, data: Buffer, options?: WriteOptions): Promise<void> {
     try {
       await this.client.send(
-        new PutObjectCommand({
-          Bucket: this.bucket,
-          Key: this.fullKey(key),
-          Body: data,
-          ContentType: key.endsWith('.jsonl')
-            ? 'application/x-ndjson'
-            : 'application/json',
-        }),
+        new PutObjectCommand(
+          buildPutObjectInput(this.bucket, this.fullKey(key), data, options),
+        ),
       )
     } catch (error) {
       throw new StorageError(
@@ -166,5 +200,45 @@ export class S3Storage implements StorageBackend {
         error instanceof Error ? error : new Error(String(error)),
       )
     }
+  }
+
+  async getObjectLockStatus(): Promise<ObjectLockStatus> {
+    try {
+      const response = await this.client.send(
+        new GetObjectLockConfigurationCommand({ Bucket: this.bucket }),
+      )
+
+      const enabled = response.ObjectLockConfiguration?.ObjectLockEnabled === 'Enabled'
+      const defaultRetention = response.ObjectLockConfiguration?.Rule?.DefaultRetention
+      const mode = defaultRetention?.Mode
+      const days = defaultRetention?.Days
+        ?? (defaultRetention?.Years !== undefined ? defaultRetention.Years * 365 : undefined)
+
+      return {
+        enabled,
+        defaultMode: mode === 'GOVERNANCE' || mode === 'COMPLIANCE' ? mode : null,
+        defaultRetainDays: days ?? null,
+      }
+    } catch (error) {
+      const errorName = (error as { name?: string }).name
+      if (
+        errorName === 'ObjectLockConfigurationNotFoundError' ||
+        errorName === 'NoSuchObjectLockConfiguration'
+      ) {
+        return { enabled: false, defaultMode: null, defaultRetainDays: null }
+      }
+      throw new StorageError(
+        `Failed to read Object Lock configuration for bucket ${this.bucket}`,
+        error instanceof Error ? error : new Error(String(error)),
+      )
+    }
+  }
+
+  async getRetentionPolicyStatus(): Promise<RetentionPolicyStatus> {
+    return checkRetentionPolicy(this.client, this.bucket, this.prefix)
+  }
+
+  async configureRetentionPolicy(retentionDays: number): Promise<void> {
+    await configureRetentionPolicy(this.client, this.bucket, this.prefix, retentionDays)
   }
 }

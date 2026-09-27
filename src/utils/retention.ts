@@ -2,46 +2,24 @@
  * S3 lifecycle policy management for retention enforcement.
  *
  * Article 19(1) requires logs be kept at least six months.
- * This module creates and verifies S3 lifecycle rules that
- * enforce the configured retention period.
+ * This module creates and verifies the S3 lifecycle rule that
+ * expires objects at the end of the configured retention period.
+ *
+ * These helpers are driven by S3Storage, which owns the S3 client.
+ * They are exported so an operator can manage the policy out of band,
+ * for example from a deployment script using a credential that holds
+ * s3:PutLifecycleConfiguration while the runtime credential does not.
  */
 
 import {
   PutBucketLifecycleConfigurationCommand,
   GetBucketLifecycleConfigurationCommand,
-  S3Client,
+  type S3Client,
 } from '@aws-sdk/client-s3'
-import type { S3StorageConfig } from '../storage/interface.js'
+import type { RetentionPolicyStatus } from '../storage/interface.js'
 
-export interface RetentionConfig {
-  minimumDays: number
-  acknowledgeSubMinimum?: boolean
-  autoConfigureLifecycle?: boolean
-}
-
-export interface RetentionCheckResult {
-  policyExists: boolean
-  configuredDays: number | null
-  meetsMinimum: boolean
-}
-
-export function createS3ClientFromConfig(config: S3StorageConfig): S3Client {
-  return new S3Client({
-    region: config.region,
-    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
-    ...(config.forcePathStyle ? { forcePathStyle: config.forcePathStyle } : {}),
-    ...(config.credentials
-      ? {
-          credentials: {
-            accessKeyId: config.credentials.accessKeyId,
-            secretAccessKey: config.credentials.secretAccessKey,
-            ...(config.credentials.sessionToken
-              ? { sessionToken: config.credentials.sessionToken }
-              : {}),
-          },
-        }
-      : {}),
-  })
+export function retentionRuleId(prefix: string): string {
+  return `aiact-audit-log-retention-${prefix.replace(/\//g, '-')}`
 }
 
 export async function configureRetentionPolicy(
@@ -56,7 +34,7 @@ export async function configureRetentionPolicy(
       LifecycleConfiguration: {
         Rules: [
           {
-            ID: `aiact-audit-log-retention-${prefix.replace(/\//g, '-')}`,
+            ID: retentionRuleId(prefix),
             Status: 'Enabled',
             Filter: {
               Prefix: prefix + '/',
@@ -75,37 +53,35 @@ export async function checkRetentionPolicy(
   client: S3Client,
   bucket: string,
   prefix: string,
-): Promise<RetentionCheckResult> {
+): Promise<RetentionPolicyStatus> {
   try {
     const response = await client.send(
       new GetBucketLifecycleConfigurationCommand({ Bucket: bucket }),
     )
 
     if (!response.Rules) {
-      return { policyExists: false, configuredDays: null, meetsMinimum: false }
+      return { policyExists: false, configuredDays: null }
     }
 
     const matchingRule = response.Rules.find(
       (rule) =>
         rule.Status === 'Enabled' &&
         rule.Filter?.Prefix?.startsWith(prefix) &&
-        rule.Expiration?.Days,
+        rule.Expiration?.Days !== undefined,
     )
 
     if (!matchingRule) {
-      return { policyExists: false, configuredDays: null, meetsMinimum: false }
+      return { policyExists: false, configuredDays: null }
     }
 
-    const days = matchingRule.Expiration?.Days ?? 0
     return {
       policyExists: true,
-      configuredDays: days,
-      meetsMinimum: days >= 180,
+      configuredDays: matchingRule.Expiration?.Days ?? null,
     }
   } catch (error) {
     const errorName = (error as { name?: string }).name
     if (errorName === 'NoSuchLifecycleConfiguration') {
-      return { policyExists: false, configuredDays: null, meetsMinimum: false }
+      return { policyExists: false, configuredDays: null }
     }
     throw error
   }

@@ -26,6 +26,7 @@ export const exportCommand = defineCommand({
       prefix: args['prefix'],
       endpoint: args['endpoint'],
       systemId: args['system-id'],
+      hmacKey: args['hmac-key'],
     })
 
     const outputDir = args['output']

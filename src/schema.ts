@@ -95,6 +95,12 @@ export interface MatchResult {
   matchedRecordId?: string
 }
 
+// ── Hash chain algorithm ────────────────────────────────────
+
+export const HASH_ALGORITHMS = ['sha256', 'hmac-sha256'] as const
+
+export type HashAlgorithm = (typeof HASH_ALGORITHMS)[number]
+
 // ── Core log entry (required fields) ────────────────────────
 
 export interface AuditLogEntry {
@@ -146,6 +152,17 @@ export interface AuditLogEntry {
   prevHash: string
 
   hash: string
+
+  /**
+   * Which function chained this entry. Absent means 'sha256', which is the
+   * default and the only value written before v0.2.0.
+   *
+   * This field records what was used; it is not a verification input. A
+   * verifier that holds an HMAC key must verify under that key regardless of
+   * what an entry claims here, otherwise an attacker could strip the field and
+   * recompute the chain unkeyed.
+   */
+  hashAlgorithm?: HashAlgorithm
 }
 
 // ── Extended log entry (optional fields) ────────────────────

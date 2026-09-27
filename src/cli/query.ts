@@ -23,6 +23,7 @@ export const queryCommand = defineCommand({
       prefix: args['prefix'],
       endpoint: args['endpoint'],
       systemId: args['system-id'],
+      hmacKey: args['hmac-key'],
     })
 
     const entries = await reader.query({

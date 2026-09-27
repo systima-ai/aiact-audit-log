@@ -13,6 +13,12 @@ export interface CLIStorageArgs {
   prefix?: string
   endpoint?: string
   systemId?: string
+  hmacKey?: string
+}
+
+export function resolveIntegrity(args: CLIStorageArgs): { hmacKey?: string } {
+  const hmacKey = args.hmacKey ?? process.env['AIACT_HMAC_KEY']
+  return hmacKey ? { hmacKey } : {}
 }
 
 export function resolveStorageConfig(args: CLIStorageArgs): StorageConfig {
@@ -56,7 +62,7 @@ export function resolveSystemId(args: CLIStorageArgs): string {
 export function createReader(args: CLIStorageArgs): AuditLogReader {
   const storage = resolveStorageConfig(args)
   const systemId = resolveSystemId(args)
-  return new AuditLogReader({ storage, systemId })
+  return new AuditLogReader({ storage, systemId, integrity: resolveIntegrity(args) })
 }
 
 export function createLogger(args: CLIStorageArgs): AuditLogger {
@@ -65,7 +71,8 @@ export function createLogger(args: CLIStorageArgs): AuditLogger {
   return new AuditLogger({
     systemId,
     storage,
-    retention: { minimumDays: 180 },
+    retention: { minimumDays: 180, autoConfigureLifecycle: false },
+    integrity: resolveIntegrity(args),
   })
 }
 
@@ -107,5 +114,10 @@ export const storageArgs = {
     type: 'string' as const,
     description: 'AI system identifier (or AIACT_SYSTEM_ID)',
     alias: 'systemId',
+  },
+  'hmac-key': {
+    type: 'string' as const,
+    description: 'HMAC key the chain was written under (or AIACT_HMAC_KEY)',
+    alias: 'hmacKey',
   },
 }
