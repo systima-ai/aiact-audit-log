@@ -30,7 +30,8 @@
     "dist",
     "LICENSE",
     "README.md",
-    "COMPLIANCE.md"
+    "COMPLIANCE.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup",

@@ -535,6 +535,10 @@ For a compliance assessment of your specific system covering risk management, hu
 - `@aws-sdk/client-s3` ^3.x (peer dependency; required for S3 storage, not needed for filesystem storage)
 - `ai` >=4.0.0 (optional peer dependency, for AI SDK middleware integration)
 
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md). Versions before 0.2.0 are deprecated: `objectLock` and `retention.autoConfigureLifecycle` were accepted as configuration but never applied to storage writes, so neither provided the protection it named.
+
 ## Licence
 
 [MIT](./LICENSE)
